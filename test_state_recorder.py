@@ -71,7 +71,7 @@ def test_state_recording(checkpoint_path: str, num_samples: int = 2, max_steps: 
     # Create recorder and wrapper
     print(f"\n🎬 Setting up state recorder")
     recorder = HRMStateRecorder(device="cuda")
-    wrapped_model = HRMRecordingWrapper(model, recorder)
+    wrapped_model = HRMRecordingWrapper(model, recorder, config.arch)
     
     # Run inference with recording
     print(f"\n🔍 Running inference with state recording")

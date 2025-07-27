@@ -225,11 +225,29 @@ class HRMStateRecorder:
 class HRMRecordingWrapper(nn.Module):
     """Wrapper that instruments an HRM model for state recording."""
     
-    def __init__(self, model: nn.Module, recorder: HRMStateRecorder):
+    def __init__(self, model: nn.Module, recorder: HRMStateRecorder, config=None):
         super().__init__()
         self.model = model
         self.recorder = recorder
+        self.config = config  # Store config separately
         self._step_counter = 0
+        
+    def _get_model_config(self):
+        """Get the model config from various possible locations."""
+        # If config was provided directly, use it
+        if self.config is not None:
+            return self.config
+            
+        # Try to get config from the model itself
+        if hasattr(self.model, 'config'):
+            return self.model.config
+        
+        # If model is wrapped (e.g., in ACTLossHead), try to get config from inner model
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'config'):
+            return self.model.model.config
+            
+        # If no config found, return None (will use defaults)
+        return None
         
     def forward(self, carry, batch, return_keys=None):
         """Forward pass with state recording."""
@@ -242,8 +260,14 @@ class HRMRecordingWrapper(nn.Module):
             self._step_counter = 0
         
         # Get model config for cycles
-        h_cycles = getattr(self.model.config, 'H_cycles', 2)
-        l_cycles = getattr(self.model.config, 'L_cycles', 2)
+        model_config = self._get_model_config()
+        if model_config is not None:
+            h_cycles = getattr(model_config, 'H_cycles', 2)
+            l_cycles = getattr(model_config, 'L_cycles', 2)
+        else:
+            # Default values if no config available
+            h_cycles = 2
+            l_cycles = 2
         
         # Record initial state
         if hasattr(carry, 'inner_carry'):
