@@ -288,7 +288,7 @@ class HRMRecordingWrapper(nn.Module):
         )
         
         # Forward pass
-        new_carry, outputs = self.model(carry, batch, return_keys)
+        new_carry, outputs = self.model(carry=carry, batch=batch, return_keys=return_keys)
         
         # Record final state and Q-head outputs
         if hasattr(new_carry, 'inner_carry'):
