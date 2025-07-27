@@ -19,6 +19,7 @@ import torch.nn as nn
 from pathlib import Path
 import json
 import numpy as np
+import datetime
 
 
 @dataclass
@@ -216,6 +217,397 @@ class HRMStateRecorder:
             json.dump(data, f, indent=2)
             
         print(f"Saved {len(self.traces)} traces to {filepath}")
+
+    def save_traces_with_tensors(self, base_filepath: str, save_format: str = "pt"):
+        """
+        Save traces with full tensor data for embedding analysis.
+        
+        Args:
+            base_filepath: Base path (without extension) for saving files
+            save_format: "pt" for PyTorch, "npz" for NumPy, "both" for both formats
+        """
+        base_path = Path(base_filepath)
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save metadata as JSON
+        metadata_file = f"{base_path}_metadata.json"
+        self.save_traces(metadata_file, include_states=False)
+        
+        # Save tensor data
+        for trace_id, trace in enumerate(self.traces):
+            trace_data = {
+                'h_states': [],
+                'l_states': [], 
+                'q_halt_logits': [],
+                'q_continue_logits': [],
+                'steps': [],
+                'h_cycles': [],
+                'l_cycles': [],
+                'is_h_update': [],
+                'halted': []
+            }
+            
+            for snapshot in trace.snapshots:
+                # Collect tensor data
+                if snapshot.z_H is not None:
+                    trace_data['h_states'].append(snapshot.z_H)
+                if snapshot.z_L is not None:
+                    trace_data['l_states'].append(snapshot.z_L)
+                if snapshot.q_halt_logits is not None:
+                    trace_data['q_halt_logits'].append(snapshot.q_halt_logits)
+                if snapshot.q_continue_logits is not None:
+                    trace_data['q_continue_logits'].append(snapshot.q_continue_logits)
+                if snapshot.halted is not None:
+                    trace_data['halted'].append(snapshot.halted)
+                    
+                # Collect metadata
+                trace_data['steps'].append(snapshot.step)
+                trace_data['h_cycles'].append(snapshot.h_cycle)
+                trace_data['l_cycles'].append(snapshot.l_cycle)
+                trace_data['is_h_update'].append(snapshot.is_h_update)
+            
+            # Stack tensors if available
+            stacked_data = {}
+            if trace_data['h_states']:
+                stacked_data['h_states'] = torch.stack(trace_data['h_states'])
+            if trace_data['l_states']:
+                stacked_data['l_states'] = torch.stack(trace_data['l_states'])
+            if trace_data['q_halt_logits']:
+                stacked_data['q_halt_logits'] = torch.stack(trace_data['q_halt_logits'])
+            if trace_data['q_continue_logits']:
+                stacked_data['q_continue_logits'] = torch.stack(trace_data['q_continue_logits'])
+            if trace_data['halted']:
+                stacked_data['halted'] = torch.stack(trace_data['halted'])
+                
+            # Add metadata
+            stacked_data['steps'] = torch.tensor(trace_data['steps'])
+            stacked_data['h_cycles'] = torch.tensor(trace_data['h_cycles'])
+            stacked_data['l_cycles'] = torch.tensor(trace_data['l_cycles'])
+            stacked_data['is_h_update'] = torch.tensor(trace_data['is_h_update'])
+            
+            # Save in requested format(s)
+            if save_format in ["pt", "both"]:
+                pt_file = f"{base_path}_trace_{trace_id}.pt"
+                torch.save(stacked_data, str(pt_file))
+                print(f"Saved trace {trace_id} tensors to {pt_file}")
+                
+            if save_format in ["npz", "both"]:
+                npz_file = f"{base_path}_trace_{trace_id}.npz"
+                numpy_data = {}
+                for key, tensor in stacked_data.items():
+                    if isinstance(tensor, torch.Tensor):
+                        numpy_data[key] = tensor.cpu().numpy()
+                    else:
+                        numpy_data[key] = tensor
+                        
+                import numpy as np
+                np.savez_compressed(str(npz_file), **numpy_data)
+                print(f"Saved trace {trace_id} tensors to {npz_file}")
+        
+        print(f"\n✅ Saved {len(self.traces)} traces with full tensor data")
+        print(f"   Metadata: {metadata_file}")
+        print(f"   Tensors: {base_path}_trace_*.{save_format}")
+
+    def load_traces_with_tensors(self, base_filepath: str, trace_id: int = 0, load_format: str = "pt"):
+        """
+        Load traces with full tensor data for analysis.
+        
+        Args:
+            base_filepath: Base path used when saving
+            trace_id: Which trace to load (default: 0)
+            load_format: "pt" for PyTorch, "npz" for NumPy
+            
+        Returns:
+            Dictionary with tensor data and metadata
+        """
+        base_path = Path(base_filepath)
+        
+        if load_format == "pt":
+            tensor_file = f"{base_path}_trace_{trace_id}.pt"
+            data = torch.load(str(tensor_file), map_location="cpu")
+        elif load_format == "npz":
+            tensor_file = f"{base_path}_trace_{trace_id}.npz"
+            import numpy as np
+            npz_data = np.load(str(tensor_file))
+            data = {key: torch.from_numpy(npz_data[key]) for key in npz_data.keys()}
+        else:
+            raise ValueError(f"Unsupported load_format: {load_format}")
+            
+        print(f"Loaded trace {trace_id} from {tensor_file}")
+        return data
+
+    def upload_traces_to_comet(self, 
+                              experiment,
+                              artifact_name: str = "hrm-traces",
+                              artifact_type: str = "dataset",
+                              version: Optional[str] = None,
+                              aliases: Optional[List[str]] = None,
+                              description: str = "HRM execution traces with hidden states",
+                              model_checkpoint: Optional[str] = None,
+                              include_tensors: bool = True,
+                              tensor_format: str = "pt") -> str:
+        """
+        Upload HRM traces to Comet ML as a versioned artifact.
+        
+        Args:
+            experiment: Comet experiment object (from comet_ml.start() or comet_ml.Experiment())
+            artifact_name: Name for the artifact in Comet
+            artifact_type: Type of artifact (default: "dataset")
+            version: Specific version string, if None auto-generated
+            aliases: List of aliases for this version (e.g., ["latest", "sudoku-experiment"])
+            description: Description of the traces
+            model_checkpoint: Path to model checkpoint used (for metadata)
+            include_tensors: Whether to include full tensor data
+            tensor_format: Format for tensors ("pt", "npz", or "both")
+            
+        Returns:
+            The version string of the uploaded artifact
+        """
+        try:
+            import comet_ml
+        except ImportError:
+            raise ImportError("comet_ml is required for Comet integration. Install with: pip install comet_ml")
+        
+        if not self.traces:
+            raise ValueError("No traces to upload. Run some recordings first.")
+        
+        print(f"🚀 Uploading {len(self.traces)} HRM traces to Comet ML...")
+        
+        # Create temporary directory for staging files
+        staging_dir = Path(f"./comet_staging_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        staging_dir.mkdir(exist_ok=True)
+        
+        try:
+            # Create artifact with metadata
+            artifact_metadata = {
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "num_traces": len(self.traces),
+                "description": description,
+                "recorder_version": "1.0.0",
+                "tensor_format": tensor_format if include_tensors else "metadata_only"
+            }
+            
+            if model_checkpoint:
+                artifact_metadata["model_checkpoint"] = str(model_checkpoint)
+            
+            # Add trace summaries to metadata
+            trace_summaries = []
+            for i, trace in enumerate(self.traces):
+                summary = trace.get_execution_summary()
+                summary["trace_id"] = i
+                trace_summaries.append(summary)
+            artifact_metadata["trace_summaries"] = trace_summaries
+            
+            # Create Comet artifact
+            artifact = comet_ml.Artifact(
+                name=artifact_name,
+                artifact_type=artifact_type,
+                version=version,
+                aliases=aliases or ["latest"],
+                metadata=artifact_metadata
+            )
+            
+            # Save and add metadata file
+            metadata_file = staging_dir / "traces_metadata.json"
+            self.save_traces(str(metadata_file), include_states=True)
+            artifact.add(str(metadata_file), logical_path="traces_metadata.json", 
+                        metadata={"asset_type": "metadata", "format": "json"})
+            
+            # Save and add tensor data if requested
+            if include_tensors:
+                base_path = staging_dir / "traces"
+                self.save_traces_with_tensors(str(base_path), save_format=tensor_format)
+                
+                # Add all generated files
+                for trace_id in range(len(self.traces)):
+                    if tensor_format in ["pt", "both"]:
+                        pt_file = f"{base_path}_trace_{trace_id}.pt"
+                        if Path(pt_file).exists():
+                            artifact.add(pt_file, logical_path=f"tensors/trace_{trace_id}.pt",
+                                       metadata={"asset_type": "tensors", "format": "pytorch", "trace_id": trace_id})
+                    
+                    if tensor_format in ["npz", "both"]:
+                        npz_file = f"{base_path}_trace_{trace_id}.npz"
+                        if Path(npz_file).exists():
+                            artifact.add(npz_file, logical_path=f"tensors/trace_{trace_id}.npz",
+                                       metadata={"asset_type": "tensors", "format": "numpy", "trace_id": trace_id})
+            
+            # Log the artifact to Comet
+            experiment.log_artifact(artifact)
+            
+            # Get the actual version that was created
+            logged_version = getattr(artifact, 'version', 'unknown')
+            
+            print(f"✅ Successfully uploaded artifact '{artifact_name}' version {logged_version}")
+            print(f"   📊 {len(self.traces)} traces with metadata")
+            if include_tensors:
+                print(f"   🧠 Full tensor data in {tensor_format} format")
+            print(f"   🏷️  Aliases: {aliases or ['latest']}")
+            
+            return logged_version
+            
+        finally:
+            # Clean up staging directory
+            import shutil
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+                print(f"🧹 Cleaned up staging directory")
+
+    def download_traces_from_comet(self,
+                                  experiment, 
+                                  artifact_name: str,
+                                  version_or_alias: Optional[str] = None,
+                                  download_tensors: bool = True,
+                                  local_path: str = "./downloaded_traces") -> Dict[str, Any]:
+        """
+        Download HRM traces from a Comet ML artifact.
+        
+        Args:
+            experiment: Comet experiment object
+            artifact_name: Name of the artifact to download
+            version_or_alias: Specific version or alias, if None gets latest
+            download_tensors: Whether to download tensor data
+            local_path: Local path to download to
+            
+        Returns:
+            Dictionary with metadata and paths to downloaded files
+        """
+        try:
+            import comet_ml
+        except ImportError:
+            raise ImportError("comet_ml is required for Comet integration. Install with: pip install comet_ml")
+        
+        print(f"📥 Downloading HRM traces from Comet ML...")
+        print(f"   Artifact: {artifact_name}")
+        if version_or_alias:
+            print(f"   Version/Alias: {version_or_alias}")
+        
+        # Get the artifact
+        logged_artifact = experiment.get_artifact(artifact_name, version_or_alias=version_or_alias)
+        
+        # Download to local path
+        download_path = Path(local_path)
+        download_path.mkdir(parents=True, exist_ok=True)
+        
+        local_artifact = logged_artifact.download(str(download_path))
+        
+        # Parse the downloaded content
+        result = {
+            "artifact_name": artifact_name,
+            "version": logged_artifact.version,
+            "aliases": list(logged_artifact.aliases) if logged_artifact.aliases else [],
+            "metadata": logged_artifact.metadata,
+            "download_path": str(download_path),
+            "files": {}
+        }
+        
+        # Find downloaded files
+        metadata_file = download_path / "traces_metadata.json"
+        if metadata_file.exists():
+            result["files"]["metadata"] = str(metadata_file)
+            print(f"✅ Downloaded metadata: {metadata_file}")
+        
+        if download_tensors:
+            tensor_files = []
+            for tensor_file in download_path.glob("tensors/trace_*.pt"):
+                tensor_files.append(str(tensor_file))
+            for tensor_file in download_path.glob("tensors/trace_*.npz"):
+                tensor_files.append(str(tensor_file))
+            
+            result["files"]["tensors"] = tensor_files
+            if tensor_files:
+                print(f"✅ Downloaded {len(tensor_files)} tensor files")
+        
+        # Load the traces into this recorder
+        if metadata_file.exists():
+            self.load_traces_from_metadata(str(metadata_file))
+            print(f"✅ Loaded {len(self.traces)} traces into recorder")
+        
+        print(f"🎉 Successfully downloaded artifact version {logged_artifact.version}")
+        return result
+
+    def load_traces_from_metadata(self, metadata_file: str):
+        """Load traces from a metadata JSON file (without full tensors)."""
+        with open(metadata_file, 'r') as f:
+            data = json.load(f)
+        
+        self.traces.clear()
+        for trace_data in data.get("traces", []):
+            trace = HRMExecutionTrace()
+            summary = trace_data.get("summary", {})
+            
+            # Set trace metadata
+            trace.batch_size = summary.get("batch_size", 0)
+            trace.seq_len = summary.get("seq_len", 0)
+            trace.h_cycles = summary.get("h_cycles", 0)
+            trace.l_cycles = summary.get("l_cycles", 0)
+            trace.halt_max_steps = summary.get("halt_max_steps", 0)
+            
+            # Create placeholder snapshots (without tensor data)
+            for snap_data in trace_data.get("snapshots", []):
+                snapshot = HRMStateSnapshot(
+                    step=snap_data["step"],
+                    h_cycle=snap_data["h_cycle"],
+                    l_cycle=snap_data["l_cycle"],
+                    z_H=None,  # Placeholder
+                    z_L=None,  # Placeholder
+                    is_h_update=snap_data.get("is_h_update", False)
+                )
+                trace.snapshots.append(snapshot)
+            
+            self.traces.append(trace)
+
+    @staticmethod
+    def create_comet_experiment(project_name: str = "hrm-traces", 
+                               experiment_name: Optional[str] = None,
+                               tags: Optional[List[str]] = None,
+                               api_key: Optional[str] = None,
+                               workspace: Optional[str] = None):
+        """
+        Create a Comet ML experiment for HRM trace logging.
+        
+        Args:
+            project_name: Comet project name
+            experiment_name: Name for this experiment
+            tags: Tags to add to the experiment
+            api_key: Comet API key (if not set via environment)
+            workspace: Comet workspace name
+            
+        Returns:
+            Comet experiment object
+        """
+        try:
+            import comet_ml
+        except ImportError:
+            raise ImportError("comet_ml is required for Comet integration. Install with: pip install comet_ml")
+        
+        # Set API key if provided
+        if api_key:
+            comet_ml.init(api_key=api_key)
+        
+        experiment = comet_ml.Experiment(
+            project_name=project_name,
+            workspace=workspace
+        )
+        
+        if experiment_name:
+            experiment.set_name(experiment_name)
+        
+        if tags:
+            for tag in tags:
+                experiment.add_tag(tag)
+        
+        # Log some basic info
+        experiment.log_parameter("recorder_version", "1.0.0")
+        experiment.log_parameter("framework", "pytorch")
+        
+        print(f"🧪 Created Comet experiment: {experiment.get_name()}")
+        print(f"   Project: {project_name}")
+        if workspace:
+            print(f"   Workspace: {workspace}")
+        print(f"   URL: {experiment.url}")
+        
+        return experiment
 
     def get_latest_trace(self) -> Optional[HRMExecutionTrace]:
         """Get the most recent execution trace."""

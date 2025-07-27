@@ -181,3 +181,66 @@ Then use the provided `arc_eval.ipynb` notebook to finalize and inspect your res
       url={https://arxiv.org/abs/2506.21734}, 
 }
 ```
+
+## HRM State Recording & Analysis 🧠
+
+This repository includes advanced tools for recording and analyzing the internal states of HRM models during execution.
+
+### State Recording
+
+The HRM State Recorder captures:
+- **H-module hidden states** at each timestep
+- **L-module hidden states** at each timestep  
+- **Q-head halting decisions** (halt/continue logits)
+- **Execution metadata** (cycles, steps, timing)
+
+```bash
+# Record HRM states during inference
+python test_state_recorder.py --samples 5 --max-steps 10
+
+# Full tensor data is saved for embedding analysis
+# Output: hrm_trace_test_trace_*.pt/.npz files + metadata
+```
+
+### Cloud Storage with Comet ML
+
+Upload and version your HRM traces using [Comet ML](https://www.comet.ml) artifacts:
+
+```bash
+# Install Comet ML
+pip install comet_ml
+
+# Set up API key
+export COMET_API_KEY="your-api-key"
+
+# Test the full integration
+python test_comet_integration.py
+```
+
+**Features:**
+- **Versioned artifacts** with semantic versioning
+- **Team collaboration** via shared workspaces  
+- **Data lineage tracking** between models and traces
+- **Cloud storage** for large trace datasets
+- **Cross-experiment analysis** and comparison
+
+### Embedding Analysis
+
+Analyze the recorded hidden states:
+
+```bash
+# Analyze embeddings from local files
+python analyze_embeddings.py --plot
+
+# Analyze embeddings from Comet artifacts
+python analyze_embeddings.py --base-path downloaded_comet_traces/tensors/trace_0
+```
+
+**Analysis includes:**
+- **Dimensionality analysis** (participation ratio)
+- **State evolution** over time
+- **Cosine similarity** between timesteps
+- **Q-head decision patterns**
+- **Visualization plots**
+
+See [`COMET_INTEGRATION.md`](COMET_INTEGRATION.md) and [`HRM_STATE_RECORDING.md`](HRM_STATE_RECORDING.md) for detailed guides.

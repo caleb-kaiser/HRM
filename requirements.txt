@@ -8,3 +8,4 @@ argdantic
 omegaconf
 hydra-core
 huggingface_hub
+comet_ml

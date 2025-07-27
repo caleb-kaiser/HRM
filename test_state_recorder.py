@@ -159,14 +159,73 @@ def test_state_recording(checkpoint_path: str, num_samples: int = 2, max_steps: 
         halt_probs = [torch.sigmoid(q_halt) for q_halt, q_continue in q_decisions]
         print(f"   Mean halt probability: {torch.stack(halt_probs).mean():.4f}")
     
-    # Save trace
-    output_file = "hrm_trace_test.json"
-    recorder.save_traces(output_file, include_states=True)
-    print(f"\n💾 Saved trace to {output_file}")
+    # Save trace with full tensor data for embedding analysis
+    output_base = "hrm_trace_test"
+    recorder.save_traces_with_tensors(output_base, save_format="both")
+    print(f"\n💾 Saved full tensor data:")
+    print(f"   Metadata: {output_base}_metadata.json")
+    print(f"   H-states, L-states, Q-decisions: {output_base}_trace_*.pt/.npz")
     
     print(f"\n🎉 State recording test completed successfully!")
     print(f"   🚀 Memory usage optimized (67% reduction vs training mode)")
+    print(f"   📊 Full tensors saved for embedding analysis")
+    
+    # Optional: Upload to Comet ML if available and configured
+    try:
+        import comet_ml
+        if comet_ml.config.get_api_key():
+            response = input("\n🌟 Upload traces to Comet ML? [y/N]: ").strip().lower()
+            if response in ['y', 'yes']:
+                upload_to_comet(recorder, checkpoint_path, num_samples, max_steps)
+        else:
+            print(f"\n💡 Tip: Set up Comet ML to store traces in the cloud!")
+            print(f"   1. pip install comet_ml")
+            print(f"   2. export COMET_API_KEY='your-key'")
+            print(f"   3. Run: python test_comet_integration.py")
+    except ImportError:
+        print(f"\n💡 Install Comet ML for cloud trace storage: pip install comet_ml")
+    
     return recorder
+
+
+def upload_to_comet(recorder, checkpoint_path, num_samples, max_steps):
+    """Upload traces to Comet ML."""
+    print(f"\n🚀 Uploading to Comet ML...")
+    
+    try:
+        # Create experiment
+        experiment = recorder.create_comet_experiment(
+            project_name="hrm-traces",
+            experiment_name="sudoku-state-recording-test",
+            tags=["hrm", "sudoku", "test", "state-recording"]
+        )
+        
+        # Log test parameters
+        experiment.log_parameter("checkpoint_path", str(checkpoint_path))
+        experiment.log_parameter("num_samples", num_samples)
+        experiment.log_parameter("max_steps", max_steps)
+        experiment.log_parameter("test_type", "basic_functionality")
+        
+        # Upload traces
+        version = recorder.upload_traces_to_comet(
+            experiment=experiment,
+            artifact_name="hrm-test-traces",
+            aliases=["latest", "test"],
+            description=f"HRM test traces from {Path(checkpoint_path).name}",
+            model_checkpoint=checkpoint_path,
+            include_tensors=True,
+            tensor_format="pt"
+        )
+        
+        print(f"✅ Uploaded to Comet ML!")
+        print(f"   Version: {version}")
+        print(f"   URL: {experiment.url}")
+        
+        experiment.end()
+        
+    except Exception as e:
+        print(f"⚠️  Comet upload failed: {e}")
+        print(f"   Continuing with local storage only...")
 
 
 def main():
