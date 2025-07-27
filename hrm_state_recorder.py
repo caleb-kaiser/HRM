@@ -288,7 +288,19 @@ class HRMRecordingWrapper(nn.Module):
         )
         
         # Forward pass
-        new_carry, outputs = self.model(carry=carry, batch=batch, return_keys=return_keys)
+        new_carry, loss, metrics, preds, all_finish = self.model(carry=carry, batch=batch, return_keys=return_keys)
+        
+        # Combine outputs for compatibility
+        outputs = {
+            'loss': loss,
+            'metrics': metrics, 
+            'preds': preds,
+            'all_finish': all_finish
+        }
+        
+        # Add any outputs that might be in metrics (like q_halt_logits)
+        if metrics:
+            outputs.update(metrics)
         
         # Record final state and Q-head outputs
         if hasattr(new_carry, 'inner_carry'):
