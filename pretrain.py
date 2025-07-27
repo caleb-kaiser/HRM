@@ -11,7 +11,6 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 import tqdm
-import wandb
 import coolname
 import hydra
 import pydantic
@@ -59,7 +58,6 @@ class PretrainConfig(pydantic.BaseModel):
     puzzle_emb_weight_decay: float
 
     # Names
-    project_name: Optional[str] = None
     run_name: Optional[str] = None
     checkpoint_path: Optional[str] = None
 
@@ -331,7 +329,7 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
 
 
 def save_code_and_config(config: PretrainConfig):
-    if config.checkpoint_path is None or wandb.run is None:
+    if config.checkpoint_path is None:
         return
 
     os.makedirs(config.checkpoint_path, exist_ok=True)
@@ -352,9 +350,6 @@ def save_code_and_config(config: PretrainConfig):
     with open(config_file, "wt") as f:
         yaml.dump(config.model_dump(), f)
 
-    # Log code
-    wandb.run.log_code(config.checkpoint_path)
-
 
 def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> PretrainConfig:
     objects = [None]
@@ -362,12 +357,11 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
         config = PretrainConfig(**hydra_config)  # type: ignore
 
         # Naming
-        if config.project_name is None:
-            config.project_name = f"{os.path.basename(config.data_path).capitalize()} ACT-torch"
         if config.run_name is None:
-            config.run_name = f"{config.arch.name.split('@')[-1]} {coolname.generate_slug(2)}"
+            config.run_name = coolname.generate_slug(2)
         if config.checkpoint_path is None:
-            config.checkpoint_path = os.path.join("checkpoints", config.project_name, config.run_name)
+            dataset_name = os.path.basename(config.data_path).capitalize()
+            config.checkpoint_path = os.path.join("checkpoints", f"{dataset_name}_HRM", config.run_name)
 
         objects = [config]
 
@@ -378,10 +372,11 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
 
 
 @hydra.main(config_path="config", config_name="cfg_pretrain", version_base=None)
-def launch(hydra_config: DictConfig):
+def launch():
+    hydra_cfg = hydra.compose(config_path="../config", config_name="cfg_pretrain", overrides=[])
+
     RANK = 0
     WORLD_SIZE = 1
-
     # Initialize distributed training if in distributed environment (e.g. torchrun)
     if "LOCAL_RANK" in os.environ:
         # Initialize distributed, default device and dtype
@@ -391,9 +386,16 @@ def launch(hydra_config: DictConfig):
         WORLD_SIZE = dist.get_world_size()
 
         torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-        
-    # Load sync'ed config
-    config = load_synced_config(hydra_config, rank=RANK, world_size=WORLD_SIZE)
+
+    config = load_synced_config(hydra_cfg, RANK, WORLD_SIZE)
+
+    # Generate missing names
+    if config.run_name is None:
+        config.run_name = coolname.generate_slug(2)
+
+    if config.checkpoint_path is None:
+        dataset_name = os.path.basename(config.data_path).capitalize()
+        config.checkpoint_path = os.path.join("checkpoints", f"{dataset_name}_HRM", config.run_name)
 
     # Seed RNGs to ensure consistency
     torch.random.manual_seed(config.seed + RANK)
@@ -414,9 +416,8 @@ def launch(hydra_config: DictConfig):
     progress_bar = None
     if RANK == 0:
         progress_bar = tqdm.tqdm(total=train_state.total_steps)
-
-        wandb.init(project=config.project_name, name=config.run_name, config=config.model_dump(), settings=wandb.Settings(_disable_stats=True))  # type: ignore
-        wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
+        num_params = sum(x.numel() for x in train_state.model.parameters())
+        print(f"Model initialized with {num_params:,} parameters")
         save_code_and_config(config)
 
     # Training Loop
@@ -429,7 +430,7 @@ def launch(hydra_config: DictConfig):
             metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
             if RANK == 0 and metrics is not None:
-                wandb.log(metrics, step=train_state.step)
+                print(f"Step {train_state.step}: {metrics}")
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
 
         ############ Evaluation
@@ -437,7 +438,7 @@ def launch(hydra_config: DictConfig):
         metrics = evaluate(config, train_state, eval_loader, eval_metadata, rank=RANK, world_size=WORLD_SIZE)
 
         if RANK == 0 and metrics is not None:
-            wandb.log(metrics, step=train_state.step)
+            print(f"Evaluation at step {train_state.step}: {metrics}")
             
         ############ Checkpointing
         if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
@@ -446,7 +447,6 @@ def launch(hydra_config: DictConfig):
     # finalize
     if dist.is_initialized():
         dist.destroy_process_group()
-    wandb.finish()
 
 
 if __name__ == "__main__":

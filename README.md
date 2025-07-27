@@ -6,7 +6,7 @@ Reasoning, the process of devising and executing complex goal-oriented action se
 Current large language models (LLMs) primarily employ Chain-of-Thought (CoT) techniques, which suffer from brittle task decomposition, extensive data requirements, and high latency. Inspired by the hierarchical and multi-timescale processing in the human brain, we propose the Hierarchical Reasoning Model (HRM), a novel recurrent architecture that attains significant computational depth while maintaining both training stability and efficiency.
 HRM executes sequential reasoning tasks in a single forward pass without explicit supervision of the intermediate process, through two interdependent recurrent modules: a high-level module responsible for slow, abstract planning, and a low-level module handling rapid, detailed computations. With only 27 million parameters, HRM achieves exceptional performance on complex reasoning tasks using only 1000 training samples. The model operates without pre-training or CoT data, yet achieves nearly perfect performance on challenging tasks including complex Sudoku puzzles and optimal path finding in large mazes.
 Furthermore, HRM outperforms much larger models with significantly longer context windows on the Abstraction and Reasoning Corpus (ARC), a key benchmark for measuring artificial general intelligence capabilities.
-These results underscore HRM’s potential as a transformative advancement toward universal computation and general-purpose reasoning systems.
+These results underscore HRM's potential as a transformative advancement toward universal computation and general-purpose reasoning systems.
 
 ## Quick Start Guide 🚀
 
@@ -50,14 +50,6 @@ pip3 install flash-attn
 
 ```bash
 pip install -r requirements.txt
-```
-
-## W&B Integration 📈
-
-This project uses [Weights & Biases](https://wandb.ai/) for experiment tracking and metric visualization. Ensure you're logged in:
-
-```bash
-wandb login
 ```
 
 ## Run Experiments
@@ -160,21 +152,21 @@ OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/sudoku-
 
 ## Evaluation
 
-Evaluate your trained models:
+Evaluate your trained models by checking the console output during training. Training and evaluation metrics will be printed to the console at each evaluation interval.
 
-* Check `eval/exact_accuracy` in W&B.
-* For ARC-AGI, follow these additional steps:
+For ARC-AGI evaluation:
 
 ```bash
 OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 evaluate.py checkpoint=<CHECKPOINT_PATH>
 ```
 
-* Then use the provided `arc_eval.ipynb` notebook to finalize and inspect your results.
+Then use the provided `arc_eval.ipynb` notebook to finalize and inspect your results.
 
 ## Notes
 
  - Small-sample learning typically exhibits accuracy variance of around ±2 points.
  - For Sudoku-Extreme (1,000-example dataset), late-stage overfitting may cause numerical instability during training and Q-learning. It is advisable to use early stopping once the training accuracy approaches 100%.
+ - Training and evaluation metrics are now printed to the console instead of being logged to an external tracking service.
 
 ## Citation 📜
 
