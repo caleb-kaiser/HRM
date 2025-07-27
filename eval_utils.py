@@ -90,7 +90,8 @@ def load_eval_model(checkpoint_path, device: str = "cuda"):
             # Infer dimensions from checkpoint tensors
             vocab_size = None
             num_puzzle_identifiers = None
-            seq_len = None
+            seq_len_with_emb = None
+            puzzle_emb_len = None
             
             for key, tensor in state_dict.items():
                 if "embed_tokens.embedding_weight" in key:
@@ -101,7 +102,34 @@ def load_eval_model(checkpoint_path, device: str = "cuda"):
                 elif "puzzle_emb.weights" in key:
                     num_puzzle_identifiers = tensor.shape[0]
                 elif "embed_pos.embedding_weight" in key:
-                    seq_len = tensor.shape[0]
+                    seq_len_with_emb = tensor.shape[0]
+            
+            # Calculate puzzle embedding length from config if available
+            if num_puzzle_identifiers and seq_len_with_emb:
+                # Try to get hidden_size from checkpoint to calculate puzzle_emb_len
+                hidden_size = None
+                for key, tensor in state_dict.items():
+                    if "embed_tokens.embedding_weight" in key:
+                        hidden_size = tensor.shape[1]
+                        break
+                
+                if hidden_size and hasattr(config, 'arch') and hasattr(config.arch, '__pydantic_extra__'):
+                    puzzle_emb_ndim = config.arch.__pydantic_extra__.get('puzzle_emb_ndim', hidden_size)
+                    puzzle_emb_len = -(puzzle_emb_ndim // -hidden_size)  # Ceiling division
+                else:
+                    puzzle_emb_len = 1  # Default assumption
+            
+            # Calculate actual sequence length (subtract puzzle embedding length)
+            if seq_len_with_emb and puzzle_emb_len:
+                actual_seq_len = seq_len_with_emb - puzzle_emb_len
+            else:
+                # Use task-specific defaults based on vocab_size
+                if vocab_size == 11:  # Sudoku (0-9 + pad)
+                    actual_seq_len = 81  # 9x9 grid
+                elif vocab_size == 12:  # ARC (0-9 + pad + eos)
+                    actual_seq_len = 900  # 30x30 grid
+                else:
+                    actual_seq_len = 200  # Generic default
             
             # Use inferred values or reasonable defaults
             metadata = PuzzleDatasetMetadata(
@@ -110,9 +138,9 @@ def load_eval_model(checkpoint_path, device: str = "cuda"):
                 ignore_label_id=-100,
                 blank_identifier_id=1,
                 
-                # Inferred or default model dimensions
-                vocab_size=vocab_size or 11,  # Common for sudoku (0-9 + special)
-                seq_len=seq_len or 200,
+                # Inferred model dimensions
+                vocab_size=vocab_size or 11,
+                seq_len=actual_seq_len,
                 num_puzzle_identifiers=num_puzzle_identifiers or 1,
                 
                 # Dataset structure defaults
@@ -123,7 +151,9 @@ def load_eval_model(checkpoint_path, device: str = "cuda"):
             
             print(f"   Inferred vocab_size: {metadata.vocab_size}")
             print(f"   Inferred num_puzzle_identifiers: {metadata.num_puzzle_identifiers}")
-            print(f"   Inferred seq_len: {metadata.seq_len}")
+            print(f"   Inferred seq_len: {metadata.seq_len} (adjusted for puzzle embeddings)")
+            if puzzle_emb_len:
+                print(f"   Total model seq_len: {seq_len_with_emb} (data: {actual_seq_len} + puzzle_emb: {puzzle_emb_len})")
             
         except Exception as e:
             print(f"❌ Could not infer metadata from checkpoint: {e}")
