@@ -60,33 +60,76 @@ def load_eval_model(checkpoint_path, device: str = "cuda"):
         config_dict = yaml.safe_load(f)
     config = PretrainConfig(**config_dict)
     
-    # Try to load metadata
+    # Try multiple approaches to get metadata
+    metadata = None
+    
+    # Approach 1: Load from dataset metadata.json
     try:
         import json
-        with open(Path(config.data_path) / "metadata.json", "r") as f:
-            metadata_dict = json.load(f)
-            metadata = PuzzleDatasetMetadata(**metadata_dict)
-    except:
-        # Create minimal metadata for testing with all required fields
-        print("⚠️  Could not load metadata, using defaults")
-        metadata = PuzzleDatasetMetadata(
-            # Required token IDs
-            pad_id=0,
-            ignore_label_id=-100,  # Standard ignore label
-            blank_identifier_id=1,
-            
-            # Model dimensions  
-            vocab_size=100,
-            seq_len=200,
-            num_puzzle_identifiers=1000,
-            
-            # Dataset structure
-            total_groups=1,
-            mean_puzzle_examples=1.0,
-            sets=["test"]
-        )
+        metadata_file = Path(config.data_path) / "metadata.json"
+        if metadata_file.exists():
+            with open(metadata_file, "r") as f:
+                metadata_dict = json.load(f)
+                metadata = PuzzleDatasetMetadata(**metadata_dict)
+                print(f"✅ Loaded metadata from {metadata_file}")
+        else:
+            print(f"⚠️  Metadata file not found: {metadata_file}")
+    except Exception as e:
+        print(f"⚠️  Could not load metadata from dataset: {e}")
     
-    # Create model (no optimizers!)
+    # Approach 2: Infer from checkpoint if metadata loading failed
+    if metadata is None:
+        try:
+            print("🔍 Inferring model dimensions from checkpoint...")
+            state_dict = torch.load(str(checkpoint_path), map_location="cpu")
+            
+            # Handle torch.compile naming
+            if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+                state_dict = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
+            
+            # Infer dimensions from checkpoint tensors
+            vocab_size = None
+            num_puzzle_identifiers = None
+            seq_len = None
+            
+            for key, tensor in state_dict.items():
+                if "embed_tokens.embedding_weight" in key:
+                    vocab_size = tensor.shape[0]
+                elif "lm_head.weight" in key:
+                    if vocab_size is None:
+                        vocab_size = tensor.shape[0]
+                elif "puzzle_emb.weights" in key:
+                    num_puzzle_identifiers = tensor.shape[0]
+                elif "embed_pos.embedding_weight" in key:
+                    seq_len = tensor.shape[0]
+            
+            # Use inferred values or reasonable defaults
+            metadata = PuzzleDatasetMetadata(
+                # Required token IDs (use standard values)
+                pad_id=0,
+                ignore_label_id=-100,
+                blank_identifier_id=1,
+                
+                # Inferred or default model dimensions
+                vocab_size=vocab_size or 11,  # Common for sudoku (0-9 + special)
+                seq_len=seq_len or 200,
+                num_puzzle_identifiers=num_puzzle_identifiers or 1,
+                
+                # Dataset structure defaults
+                total_groups=1,
+                mean_puzzle_examples=1.0,
+                sets=["test"]
+            )
+            
+            print(f"   Inferred vocab_size: {metadata.vocab_size}")
+            print(f"   Inferred num_puzzle_identifiers: {metadata.num_puzzle_identifiers}")
+            print(f"   Inferred seq_len: {metadata.seq_len}")
+            
+        except Exception as e:
+            print(f"❌ Could not infer metadata from checkpoint: {e}")
+            raise
+    
+    # Create model with correct metadata
     model = create_eval_model(config, metadata)
     
     # Load checkpoint weights
