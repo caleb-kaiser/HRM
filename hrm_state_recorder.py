@@ -296,13 +296,21 @@ class HRMStateRecorder:
                 numpy_data = {}
                 for key, tensor in stacked_data.items():
                     if isinstance(tensor, torch.Tensor):
-                        numpy_data[key] = tensor.cpu().numpy()
+                        # Handle BFloat16 and other unsupported dtypes for NumPy
+                        if tensor.dtype == torch.bfloat16:
+                            numpy_data[key] = tensor.cpu().float().numpy()
+                        elif tensor.dtype == torch.float16:
+                            numpy_data[key] = tensor.cpu().float().numpy()
+                        else:
+                            numpy_data[key] = tensor.cpu().numpy()
                     else:
                         numpy_data[key] = tensor
                         
                 import numpy as np
                 np.savez_compressed(str(npz_file), **numpy_data)
                 print(f"Saved trace {trace_id} tensors to {npz_file}")
+                if any(tensor.dtype in [torch.bfloat16, torch.float16] for tensor in stacked_data.values() if isinstance(tensor, torch.Tensor)):
+                    print(f"   Note: BFloat16/Float16 tensors converted to Float32 for NumPy compatibility")
         
         print(f"\n✅ Saved {len(self.traces)} traces with full tensor data")
         print(f"   Metadata: {metadata_file}")
@@ -329,6 +337,8 @@ class HRMStateRecorder:
             tensor_file = f"{base_path}_trace_{trace_id}.npz"
             import numpy as np
             npz_data = np.load(str(tensor_file))
+            # Convert back to PyTorch tensors
+            # Note: BFloat16 tensors were converted to Float32 for NumPy compatibility
             data = {key: torch.from_numpy(npz_data[key]) for key in npz_data.keys()}
         else:
             raise ValueError(f"Unsupported load_format: {load_format}")
