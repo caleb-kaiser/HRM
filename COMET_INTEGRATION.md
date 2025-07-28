@@ -351,6 +351,35 @@ experiment.log_metric("l_state_dimensionality", data["l_participation_ratio"])
    traces = experiment.get_artifact("traces", version="1.2.3")
    ```
 
+5. **Artifact Not Found After Upload**:
+   ```python
+   # Sometimes there's a delay in artifact processing. Wait and retry:
+   import time
+   time.sleep(10)
+   
+   # Or use the experiment URL to check if artifact appears in UI
+   print(f"Check artifacts at: {experiment.url}")
+   
+   # List all artifacts to debug
+   api = comet_ml.API()
+   artifacts = api.get_artifacts(workspace="your-workspace", project="your-project")
+   print(f"Available artifacts: {[a.name for a in artifacts]}")
+   ```
+
+6. **Manual Download Workaround**:
+   ```python
+   # If automatic download fails, use the Comet UI or API directly
+   import comet_ml
+   
+   api = comet_ml.API()
+   experiment = api.get_experiment("your-workspace", "your-project", "experiment-id")
+   
+   # List artifacts
+   artifacts = experiment.get_artifacts()
+   for artifact in artifacts:
+       print(f"Artifact: {artifact.name}, Version: {artifact.version}")
+   ```
+
 ## 🌟 Best Practices
 
 1. **Use meaningful artifact names**: `hrm-sudoku-traces` vs `traces`

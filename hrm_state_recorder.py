@@ -443,7 +443,27 @@ class HRMStateRecorder:
                                        metadata={"asset_type": "tensors", "format": "numpy", "trace_id": trace_id})
             
             # Log the artifact to Comet
-            experiment.log_artifact(artifact)
+            print(f"📤 Logging artifact to Comet ML...")
+            try:
+                experiment.log_artifact(artifact)
+                print(f"✅ Artifact logged successfully")
+            except Exception as e:
+                print(f"❌ Failed to log artifact: {e}")
+                raise
+            
+            # Verify the artifact was uploaded by trying to retrieve it
+            try:
+                print(f"🔍 Verifying artifact upload...")
+                # Small delay to ensure artifact is processed
+                import time
+                time.sleep(2)
+                
+                # Try to retrieve the artifact to verify it exists
+                verification_artifact = experiment.get_artifact(artifact_name, version_or_alias=aliases[0] if aliases else None)
+                print(f"✅ Artifact verification successful")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not verify artifact upload: {e}")
+                print(f"   The artifact may still be processing on Comet's servers")
             
             # Get the actual version that was created
             logged_version = getattr(artifact, 'version', 'unknown')
