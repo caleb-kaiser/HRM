@@ -55,26 +55,60 @@ class TraceDatasetConfig:
 
 def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple[List[List[int]], List[List[int]]]:
     """Extract a single Sudoku problem and solution from a batch."""
-    # Get the input and target for this sample
-    inputs = batch['inputs'][idx].cpu().numpy()  # [seq_len]
-    targets = batch['targets'][idx].cpu().numpy()  # [seq_len]
-    
-    # Convert from flattened representation back to 9x9 grid
-    # This depends on how the Sudoku dataset encodes the problems
-    # Assuming the first 81 tokens are the input grid, next 81 are target
-    
-    # Extract input grid (first 81 positions)
-    input_grid = inputs[:81].reshape(9, 9).tolist()
-    
-    # Extract target grid - need to handle the target encoding
-    # Typically targets are shifted or have special encoding
-    if len(targets) >= 81:
-        target_grid = targets[:81].reshape(9, 9).tolist()
-    else:
-        # If targets are encoded differently, try to reconstruct
-        target_grid = input_grid  # Fallback
-    
-    return input_grid, target_grid
+    try:
+        # Debug: Print available keys for troubleshooting
+        if idx == 0:  # Only print for first sample to avoid spam
+            print(f"   Available batch keys: {list(batch.keys())}")
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor):
+                    print(f"   {key}: shape {value.shape}, dtype {value.dtype}")
+        
+        # Get the input for this sample
+        inputs = batch['inputs'][idx].cpu().numpy()  # [seq_len]
+        
+        # Try to get targets - handle different possible key names
+        targets = None
+        target_keys = ['targets', 'labels', 'target', 'solutions', 'outputs']
+        
+        for target_key in target_keys:
+            if target_key in batch:
+                targets = batch[target_key][idx].cpu().numpy()
+                break
+        
+        # Convert from flattened representation back to 9x9 grid
+        # Extract input grid (first 81 positions, assuming 0-10 vocabulary)
+        # Filter out special tokens (padding, etc.) and keep only 0-9
+        valid_inputs = inputs[:81]  # Take first 81 tokens
+        valid_inputs = np.clip(valid_inputs, 0, 9)  # Ensure values are 0-9
+        input_grid = valid_inputs.reshape(9, 9).tolist()
+        
+        # Extract target grid
+        if targets is not None and len(targets) >= 81:
+            valid_targets = targets[:81]
+            valid_targets = np.clip(valid_targets, 0, 9)  # Ensure values are 0-9
+            target_grid = valid_targets.reshape(9, 9).tolist()
+        else:
+            # Fallback: try to extract solution from input sequence
+            # Some datasets encode the solution after the input
+            if len(inputs) >= 162:  # Input + solution
+                solution_part = inputs[81:162]
+                solution_part = np.clip(solution_part, 0, 9)
+                target_grid = solution_part.reshape(9, 9).tolist()
+            else:
+                # Last resort: use input as target (for now)
+                target_grid = input_grid.copy()
+                if idx == 0:  # Only warn once
+                    print(f"   Warning: No targets found, using input as fallback")
+        
+        return input_grid, target_grid
+        
+    except Exception as e:
+        # More detailed error info
+        print(f"   Error in extract_sudoku_from_batch for sample {idx}: {e}")
+        print(f"   Batch keys: {list(batch.keys()) if batch else 'None'}")
+        if 'inputs' in batch:
+            print(f"   Input shape: {batch['inputs'].shape}")
+        raise
 
 
 def create_sudoku_dataloader(config, dataset_config: TraceDatasetConfig):
@@ -117,7 +151,11 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
             }
             
             # Extract Sudoku problem
-            sudoku_input, sudoku_target = extract_sudoku_from_batch(batch, sample_idx)
+            try:
+                sudoku_input, sudoku_target = extract_sudoku_from_batch(batch, sample_idx)
+            except Exception as e:
+                print(f"⚠️  Error extracting Sudoku from problem {problem_id}: {e}")
+                continue
             
             # Initialize model state
             with torch.device("cuda"):
