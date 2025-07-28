@@ -1,6 +1,6 @@
 import pydantic
 from typing import Optional, List
-
+from dataset.common import PuzzleDatasetMetadata
 
 class LossConfig(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra='allow')
