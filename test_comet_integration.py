@@ -242,12 +242,8 @@ def main():
         # Check if Comet ML is available
         import comet_ml
         print("✅ Comet ML is available")
+
         
-        # Check for API key
-        if not comet_ml.config.get_api_key():
-            print("⚠️  No Comet API key found. Please set COMET_API_KEY environment variable")
-            print("   or run: comet_ml.login()")
-            return 1
         
     except ImportError:
         print("❌ Comet ML not installed. Run: pip install comet_ml")
