@@ -19,7 +19,7 @@ import torch
 import json
 import argparse
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
 from tqdm import tqdm
 from dataclasses import dataclass, asdict
@@ -45,7 +45,7 @@ class TraceDatasetConfig:
     checkpoint_path: str
     output_dir: str = "./sudoku_trace_dataset"
     batch_size: int = 8
-    max_problems: int = None  # None = process all
+    max_problems: Optional[int] = None  # None = process all
     max_steps_per_problem: int = 50
     tensor_format: str = "pt"  # "pt", "npz", or "both"
     include_failed: bool = False  # Include traces where model failed
@@ -111,6 +111,116 @@ def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple
         raise
 
 
+def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], seq_len: int = 81) -> Optional[List[List[int]]]:
+    """Extract the final Sudoku prediction from model outputs."""
+    try:
+        # The outputs typically contain 'preds' or 'logits'
+        if 'preds' in outputs:
+            predictions = outputs['preds']
+        elif 'logits' in outputs:
+            # Convert logits to predictions
+            predictions = torch.argmax(outputs['logits'], dim=-1)
+        else:
+            # Fallback: look for any tensor that could be predictions
+            for key, value in outputs.items():
+                if isinstance(value, torch.Tensor) and value.numel() > 0:
+                    if len(value.shape) >= 2:  # Has batch and sequence dimensions
+                        predictions = value
+                        if predictions.dtype == torch.float:
+                            predictions = torch.argmax(predictions, dim=-1)
+                        break
+            else:
+                return None
+        
+        # Extract first batch item and first seq_len tokens
+        if predictions.dim() >= 2:
+            pred_sequence = predictions[0, :seq_len].cpu().numpy()
+        else:
+            pred_sequence = predictions[:seq_len].cpu().numpy()
+        
+        # Ensure values are in valid range (0-9)
+        pred_sequence = np.clip(pred_sequence, 0, 9)
+        
+        # Reshape to 9x9 grid
+        if len(pred_sequence) >= 81:
+            prediction_grid = pred_sequence[:81].reshape(9, 9).tolist()
+            return prediction_grid
+        else:
+            return None
+            
+    except Exception as e:
+        print(f"   Warning: Could not extract prediction: {e}")
+        return None
+
+
+def compare_sudoku_solutions(prediction: Optional[List[List[int]]], target: List[List[int]]) -> Dict[str, Any]:
+    """Compare predicted Sudoku solution with target."""
+    if prediction is None:
+        return {
+            "is_exact_match": False,
+            "accuracy": 0.0,
+            "correct_cells": 0,
+            "total_cells": 81,
+            "valid_sudoku": False
+        }
+    
+    # Convert to numpy for easier comparison
+    pred_array = np.array(prediction)
+    target_array = np.array(target)
+    
+    # Calculate cell-wise accuracy
+    correct_mask = (pred_array == target_array)
+    correct_cells = np.sum(correct_mask)
+    total_cells = pred_array.size
+    accuracy = correct_cells / total_cells
+    
+    # Check for exact match
+    is_exact_match = (correct_cells == total_cells)
+    
+    # Basic Sudoku validity check
+    valid_sudoku = is_valid_sudoku(prediction)
+    
+    return {
+        "is_exact_match": is_exact_match,
+        "accuracy": float(accuracy),
+        "correct_cells": int(correct_cells),
+        "total_cells": int(total_cells),
+        "valid_sudoku": valid_sudoku
+    }
+
+
+def is_valid_sudoku(grid: List[List[int]]) -> bool:
+    """Check if a Sudoku grid is valid (no duplicates in rows/cols/boxes)."""
+    try:
+        grid_array = np.array(grid)
+        
+        # Check rows
+        for row in grid_array:
+            non_zero = row[row != 0]
+            if len(non_zero) != len(np.unique(non_zero)):
+                return False
+        
+        # Check columns  
+        for col in range(9):
+            column = grid_array[:, col]
+            non_zero = column[column != 0]
+            if len(non_zero) != len(np.unique(non_zero)):
+                return False
+        
+        # Check 3x3 boxes
+        for box_row in range(3):
+            for box_col in range(3):
+                box = grid_array[box_row*3:(box_row+1)*3, box_col*3:(box_col+1)*3].flatten()
+                non_zero = box[box != 0]
+                if len(non_zero) != len(np.unique(non_zero)):
+                    return False
+        
+        return True
+        
+    except Exception:
+        return False
+
+
 def create_sudoku_dataloader(config, dataset_config: TraceDatasetConfig):
     """Create dataloader for the training dataset."""
     try:
@@ -165,12 +275,14 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
             wrapped_model.recorder.clear_traces()  # Clear previous traces
             wrapped_model.recorder.start_recording(model)
             
+            final_outputs = None
             with torch.inference_mode():
                 step = 0
                 halted = False
                 
                 while step < dataset_config.max_steps_per_problem and not halted:
                     carry, outputs = wrapped_model(carry, single_batch, return_keys=[])
+                    final_outputs = outputs  # Keep the last outputs for prediction extraction
                     
                     # Check if halted
                     if hasattr(carry, 'halted') and carry.halted.all():
@@ -179,6 +291,10 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                     step += 1
             
             wrapped_model.recorder.stop_recording()
+            
+            # Extract final prediction and check correctness
+            final_prediction = extract_prediction_from_outputs(final_outputs) if final_outputs else None
+            correctness_info = compare_sudoku_solutions(final_prediction, sudoku_target)
             
             # Check if we should include this trace
             if not dataset_config.include_failed and not halted:
@@ -199,6 +315,12 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                     "halted": halted,
                     "batch_id": problem_offset // dataset_config.batch_size,
                     "sample_in_batch": sample_idx,
+                    # Correctness tracking
+                    "is_correct": correctness_info["is_exact_match"],
+                    "accuracy": correctness_info["accuracy"],
+                    "correct_cells": correctness_info["correct_cells"],
+                    "valid_sudoku": correctness_info["valid_sudoku"],
+                    "final_prediction": final_prediction,
                 },
                 trace_file=str(trace_file_path)
             )

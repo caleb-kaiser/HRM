@@ -35,6 +35,11 @@ class TraceAnalysis:
     sudoku_target: List[List[int]]
     steps_taken: int
     halted: bool
+    # Correctness metrics
+    is_correct: bool
+    accuracy: float
+    valid_sudoku: bool
+    # State analysis
     h_dimensionality: float
     l_dimensionality: float
     average_halt_confidence: float
@@ -118,7 +123,7 @@ def analyze_state_evolution(h_states: torch.Tensor, l_states: torch.Tensor) -> s
         return "insufficient_data"
 
 
-def analyze_single_trace(problem_data: Dict[str, Any], dataset_dir: str) -> TraceAnalysis:
+def analyze_single_trace(problem_data: Dict[str, Any], dataset_dir: str) -> Optional[TraceAnalysis]:
     """Analyze a single problem trace."""
     problem_id = problem_data['problem_id']
     sudoku_input = problem_data['sudoku_input'] 
@@ -165,6 +170,11 @@ def analyze_single_trace(problem_data: Dict[str, Any], dataset_dir: str) -> Trac
             sudoku_target=sudoku_target,
             steps_taken=metadata.get('steps_taken', 0),
             halted=metadata.get('halted', False),
+            # Correctness metrics
+            is_correct=metadata.get('is_correct', False),
+            accuracy=metadata.get('accuracy', 0.0),
+            valid_sudoku=metadata.get('valid_sudoku', False),
+            # State analysis
             h_dimensionality=h_dimensionality,
             l_dimensionality=l_dimensionality,
             average_halt_confidence=halt_confidence,
@@ -205,6 +215,9 @@ def analyze_by_difficulty(analyses: List[TraceAnalysis]) -> Dict[str, Dict[str, 
             results[difficulty] = {
                 "count": len(group),
                 "success_rate": sum(1 for a in group if a.halted) / len(group),
+                "correctness_rate": sum(1 for a in group if a.is_correct) / len(group),
+                "valid_sudoku_rate": sum(1 for a in group if a.valid_sudoku) / len(group),
+                "avg_accuracy": np.mean([a.accuracy for a in group]),
                 "avg_steps": np.mean([a.steps_taken for a in group]),
                 "avg_h_dimensionality": np.mean([a.h_dimensionality for a in group]),
                 "avg_l_dimensionality": np.mean([a.l_dimensionality for a in group]),
@@ -258,8 +271,8 @@ def visualize_analysis_results(difficulty_analysis: Dict[str, Dict[str, float]],
                               reasoning_patterns: Dict[str, Any],
                               output_dir: str = "./analysis_plots"):
     """Create visualizations of the analysis results."""
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
     
     # Plot 1: Success rate by difficulty
     if difficulty_analysis:
@@ -281,7 +294,7 @@ def visualize_analysis_results(difficulty_analysis: Dict[str, Dict[str, float]],
         ax2.set_ylabel('Average Steps')
         
         plt.tight_layout()
-        plt.savefig(output_dir / "difficulty_analysis.png", dpi=150, bbox_inches='tight')
+        plt.savefig(output_path / "difficulty_analysis.png", dpi=150, bbox_inches='tight')
         plt.close()
     
     # Plot 2: Reasoning patterns
@@ -295,7 +308,7 @@ def visualize_analysis_results(difficulty_analysis: Dict[str, Dict[str, float]],
         plt.ylabel('Number of Traces')
         plt.xticks(rotation=45)
         plt.tight_layout()
-        plt.savefig(output_dir / "reasoning_patterns.png", dpi=150, bbox_inches='tight')
+        plt.savefig(output_path / "reasoning_patterns.png", dpi=150, bbox_inches='tight')
         plt.close()
     
     # Plot 3: Dimensionality comparison
@@ -311,10 +324,10 @@ def visualize_analysis_results(difficulty_analysis: Dict[str, Dict[str, float]],
         plt.title('Average Dimensionality by Module')
         plt.ylabel('Participation Ratio')
         plt.tight_layout()
-        plt.savefig(output_dir / "dimensionality_comparison.png", dpi=150, bbox_inches='tight')
+        plt.savefig(output_path / "dimensionality_comparison.png", dpi=150, bbox_inches='tight')
         plt.close()
     
-    print(f"📈 Visualizations saved to: {output_dir}")
+    print(f"📈 Visualizations saved to: {output_path}")
 
 
 def main():
@@ -371,9 +384,13 @@ def main():
         difficulty_results = analyze_by_difficulty(valid_analyses)
         print(f"\n🎯 Analysis by Difficulty:")
         for difficulty, stats in difficulty_results.items():
-            print(f"   {difficulty.title()}: {stats['count']} problems, "
-                  f"{stats['success_rate']:.1%} success, "
-                  f"{stats['avg_steps']:.1f} avg steps")
+            print(f"   {difficulty.title()}: {stats['count']} problems")
+            print(f"      Halting rate: {stats['success_rate']:.1%}")
+            print(f"      Correctness rate: {stats['correctness_rate']:.1%}")
+            print(f"      Valid Sudoku rate: {stats['valid_sudoku_rate']:.1%}")
+            print(f"      Avg accuracy: {stats['avg_accuracy']:.1%}")
+            print(f"      Avg steps: {stats['avg_steps']:.1f}")
+            print()
         
         # Reasoning patterns
         reasoning_results = analyze_reasoning_patterns(valid_analyses)
