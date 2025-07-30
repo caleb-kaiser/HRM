@@ -139,7 +139,7 @@ def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple
         raise
 
 
-def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], seq_len: int = 81) -> Optional[List[List[int]]]:
+def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], carry=None, seq_len: int = 81) -> Optional[List[List[int]]]:
     """Extract the final Sudoku prediction from model outputs."""
     try:
         # DEBUG: Print detailed information about outputs
@@ -163,36 +163,77 @@ def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], seq_len: i
         predictions_key = None
         
         if 'preds' in outputs:
-            predictions = outputs['preds']
-            predictions_key = 'preds'
-            debug_print(f"   🔍 DEBUG: Found predictions in 'preds' key")
-        elif 'logits' in outputs:
-            # Convert logits to predictions
-            predictions = torch.argmax(outputs['logits'], dim=-1)
-            predictions_key = 'logits'
-            debug_print(f"   🔍 DEBUG: Found predictions in 'logits' key, converted with argmax")
-        elif 'predictions' in outputs:
-            predictions = outputs['predictions']
-            predictions_key = 'predictions'
-            debug_print(f"   🔍 DEBUG: Found predictions in 'predictions' key")
-        else:
-            # Fallback: look for any tensor that could be predictions
-            debug_print(f"   🔍 DEBUG: No standard prediction keys found, trying fallback...")
-            for key, value in outputs.items():
-                if isinstance(value, torch.Tensor) and value.numel() > 0:
-                    debug_print(f"   🔍 DEBUG: Checking tensor {key}: shape={value.shape}, dtype={value.dtype}")
-                    if len(value.shape) >= 2:  # Has batch and sequence dimensions
-                        debug_print(f"   🔍 DEBUG: Tensor {key} has 2+ dimensions, trying as predictions")
-                        predictions = value
-                        predictions_key = key
-                        if predictions.dtype == torch.float:
-                            debug_print(f"   🔍 DEBUG: Converting float tensor to predictions with argmax")
-                            predictions = torch.argmax(predictions, dim=-1)
-                        break
+            preds_value = outputs['preds']
+            debug_print(f"   🔍 DEBUG: Found 'preds' key, type: {type(preds_value)}")
             
+            # Check if preds is a dict (nested structure)
+            if isinstance(preds_value, dict):
+                debug_print(f"   🔍 DEBUG: 'preds' is a dict with keys: {list(preds_value.keys())}")
+                
+                # Try to find actual prediction tensors in the nested structure
+                for pred_key, pred_value in preds_value.items():
+                    if isinstance(pred_value, torch.Tensor) and pred_value.numel() > 0:
+                        debug_print(f"   🔍 DEBUG: Found tensor in preds['{pred_key}']: shape={pred_value.shape}")
+                        if len(pred_value.shape) >= 2 and pred_value.shape[-1] >= seq_len:
+                            predictions = pred_value
+                            predictions_key = f'preds[{pred_key}]'
+                            break
+                
+                # If preds dict is empty or no suitable tensors found
+                if predictions is None:
+                    debug_print(f"   🔍 DEBUG: No suitable tensors found in 'preds' dict")
+            else:
+                # preds is a tensor
+                predictions = preds_value
+                predictions_key = 'preds'
+                debug_print(f"   🔍 DEBUG: 'preds' is a tensor: shape={predictions.shape}")
+        
+        # Try alternative prediction sources if preds didn't work
+        if predictions is None:
+            debug_print(f"   🔍 DEBUG: 'preds' didn't contain predictions, trying alternatives...")
+            
+            # Try logits
+            if 'logits' in outputs:
+                predictions = torch.argmax(outputs['logits'], dim=-1)
+                predictions_key = 'logits'
+                debug_print(f"   🔍 DEBUG: Found predictions in 'logits' key, converted with argmax")
+            
+            # Try looking in the carry state for predictions
+            elif carry is not None:
+                debug_print(f"   🔍 DEBUG: Checking carry state for predictions...")
+                if hasattr(carry, 'predictions'):
+                    predictions = carry.predictions
+                    predictions_key = 'carry.predictions'
+                    debug_print(f"   🔍 DEBUG: Found predictions in carry state")
+                elif hasattr(carry, 'output'):
+                    predictions = carry.output
+                    predictions_key = 'carry.output'
+                    debug_print(f"   🔍 DEBUG: Found output in carry state")
+                elif hasattr(carry, 'logits'):
+                    predictions = torch.argmax(carry.logits, dim=-1)
+                    predictions_key = 'carry.logits'
+                    debug_print(f"   🔍 DEBUG: Found logits in carry state, converted with argmax")
+            
+            # Fallback: try any 2D+ tensor with reasonable size
             if predictions is None:
-                debug_print(f"   🔍 DEBUG: No suitable prediction tensor found")
-                return None
+                debug_print(f"   🔍 DEBUG: No standard prediction sources found, trying fallback...")
+                for key, value in outputs.items():
+                    if isinstance(value, torch.Tensor) and value.numel() > 0:
+                        debug_print(f"   🔍 DEBUG: Checking tensor {key}: shape={value.shape}, dtype={value.dtype}")
+                        if len(value.shape) >= 2 and value.shape[-1] >= seq_len:  # Has batch and sequence dimensions
+                            debug_print(f"   🔍 DEBUG: Tensor {key} has suitable dimensions, trying as predictions")
+                            predictions = value
+                            predictions_key = key
+                            if predictions.dtype == torch.float:
+                                debug_print(f"   🔍 DEBUG: Converting float tensor to predictions with argmax")
+                                predictions = torch.argmax(predictions, dim=-1)
+                            break
+        
+        if predictions is None:
+            debug_print(f"   🔍 DEBUG: No suitable prediction tensor found anywhere")
+            debug_print(f"   🔍 DEBUG: This suggests the model may not be generating predictions during inference")
+            debug_print(f"   🔍 DEBUG: Consider calling model with different parameters or extracting from input data")
+            return None
         
         debug_print(f"   🔍 DEBUG: Using predictions from '{predictions_key}': shape={predictions.shape}, dtype={predictions.dtype}")
         
@@ -382,7 +423,7 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                 debug_print(f"   🔍 DEBUG: final_outputs keys: {list(final_outputs.keys())}")
             
             # Extract final prediction and check correctness
-            final_prediction = extract_prediction_from_outputs(final_outputs) if final_outputs else None
+            final_prediction = extract_prediction_from_outputs(final_outputs, carry=carry) if final_outputs else None
             correctness_info = compare_sudoku_solutions(final_prediction, sudoku_target)
             
             # Check if we should include this trace
