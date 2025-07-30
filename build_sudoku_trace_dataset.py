@@ -627,6 +627,27 @@ def save_batch_traces(recorder: HRMStateRecorder, problem_traces: List[ProblemTr
             )
 
 
+def make_json_serializable(obj):
+    """Convert numpy/torch types to JSON-serializable Python types."""
+    if isinstance(obj, dict):
+        return {key: make_json_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [make_json_serializable(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.bool_, np.integer, np.floating)):
+        return obj.item()
+    elif hasattr(obj, 'item') and callable(obj.item):  # torch tensors
+        return obj.item()
+    elif isinstance(obj, bool):
+        return bool(obj)  # Ensure Python bool
+    elif isinstance(obj, (int, float, str, type(None))):
+        return obj
+    else:
+        # For other types, try to convert to string
+        return str(obj)
+
+
 def build_trace_dataset(dataset_config: TraceDatasetConfig, debug_enabled: bool = False) -> Dict[str, Any]:
     """Build the complete trace dataset."""
     
@@ -707,13 +728,30 @@ def build_trace_dataset(dataset_config: TraceDatasetConfig, debug_enabled: bool 
         "successful_traces": sum(1 for pt in all_problem_traces if pt.metadata.get("halted", False)),
         "config": asdict(dataset_config),
         "model_checkpoint": dataset_config.checkpoint_path,
-        "created_at": torch.utils.data.get_worker_info(),  # Timestamp would be better
+        "created_at": datetime.datetime.now().isoformat(),  # Use proper timestamp
         "problems": [asdict(pt) for pt in all_problem_traces]
     }
     
+    debug_print(f"   📊 Raw metadata created, converting to JSON-serializable format...")
+    
+    # Convert to JSON-serializable format
+    try:
+        dataset_metadata = make_json_serializable(dataset_metadata)
+        debug_print(f"   ✅ Metadata conversion successful")
+    except Exception as e:
+        debug_print(f"   ❌ Metadata conversion failed: {e}")
+        raise
+    
     metadata_file = output_dir / "dataset_metadata.json"
-    with open(metadata_file, 'w') as f:
-        json.dump(dataset_metadata, f, indent=2)
+    debug_print(f"   💾 Saving metadata to {metadata_file}...")
+    
+    try:
+        with open(metadata_file, 'w') as f:
+            json.dump(dataset_metadata, f, indent=2)
+        debug_print(f"   ✅ Metadata saved successfully")
+    except Exception as e:
+        debug_print(f"   ❌ Metadata save failed: {e}")
+        raise
     
     debug_print(f"\n✅ Dataset building completed!")
     debug_print(f"   📊 Total problems processed: {len(all_problem_traces)}")
