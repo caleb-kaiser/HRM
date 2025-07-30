@@ -114,42 +114,86 @@ def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple
 def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], seq_len: int = 81) -> Optional[List[List[int]]]:
     """Extract the final Sudoku prediction from model outputs."""
     try:
+        # DEBUG: Print detailed information about outputs
+        print(f"   🔍 DEBUG: extract_prediction_from_outputs called")
+        print(f"   🔍 DEBUG: outputs type: {type(outputs)}")
+        
+        if isinstance(outputs, dict):
+            print(f"   🔍 DEBUG: outputs keys: {list(outputs.keys())}")
+            for key, value in outputs.items():
+                value_type = type(value)
+                if hasattr(value, 'shape'):
+                    print(f"   🔍 DEBUG: {key}: type={value_type}, shape={value.shape}, dtype={getattr(value, 'dtype', 'unknown')}")
+                else:
+                    print(f"   🔍 DEBUG: {key}: type={value_type}, value={value}")
+        else:
+            print(f"   🔍 DEBUG: outputs is not a dict: {outputs}")
+            return None
+        
         # The outputs typically contain 'preds' or 'logits'
+        predictions = None
+        predictions_key = None
+        
         if 'preds' in outputs:
             predictions = outputs['preds']
+            predictions_key = 'preds'
+            print(f"   🔍 DEBUG: Found predictions in 'preds' key")
         elif 'logits' in outputs:
             # Convert logits to predictions
             predictions = torch.argmax(outputs['logits'], dim=-1)
+            predictions_key = 'logits'
+            print(f"   🔍 DEBUG: Found predictions in 'logits' key, converted with argmax")
+        elif 'predictions' in outputs:
+            predictions = outputs['predictions']
+            predictions_key = 'predictions'
+            print(f"   🔍 DEBUG: Found predictions in 'predictions' key")
         else:
             # Fallback: look for any tensor that could be predictions
+            print(f"   🔍 DEBUG: No standard prediction keys found, trying fallback...")
             for key, value in outputs.items():
                 if isinstance(value, torch.Tensor) and value.numel() > 0:
+                    print(f"   🔍 DEBUG: Checking tensor {key}: shape={value.shape}, dtype={value.dtype}")
                     if len(value.shape) >= 2:  # Has batch and sequence dimensions
+                        print(f"   🔍 DEBUG: Tensor {key} has 2+ dimensions, trying as predictions")
                         predictions = value
+                        predictions_key = key
                         if predictions.dtype == torch.float:
+                            print(f"   🔍 DEBUG: Converting float tensor to predictions with argmax")
                             predictions = torch.argmax(predictions, dim=-1)
                         break
-            else:
+            
+            if predictions is None:
+                print(f"   🔍 DEBUG: No suitable prediction tensor found")
                 return None
+        
+        print(f"   🔍 DEBUG: Using predictions from '{predictions_key}': shape={predictions.shape}, dtype={predictions.dtype}")
         
         # Extract first batch item and first seq_len tokens
         if predictions.dim() >= 2:
             pred_sequence = predictions[0, :seq_len].cpu().numpy()
+            print(f"   🔍 DEBUG: Extracted sequence from [0, :{seq_len}]: shape={pred_sequence.shape}")
         else:
             pred_sequence = predictions[:seq_len].cpu().numpy()
+            print(f"   🔍 DEBUG: Extracted sequence from [:{seq_len}]: shape={pred_sequence.shape}")
         
         # Ensure values are in valid range (0-9)
         pred_sequence = np.clip(pred_sequence, 0, 9)
+        print(f"   🔍 DEBUG: Clipped values to 0-9 range")
         
         # Reshape to 9x9 grid
         if len(pred_sequence) >= 81:
             prediction_grid = pred_sequence[:81].reshape(9, 9).tolist()
+            print(f"   🔍 DEBUG: Successfully reshaped to 9x9 grid")
+            print(f"   🔍 DEBUG: First row of prediction: {prediction_grid[0]}")
             return prediction_grid
         else:
+            print(f"   🔍 DEBUG: Sequence too short: {len(pred_sequence)} < 81")
             return None
             
     except Exception as e:
-        print(f"   Warning: Could not extract prediction: {e}")
+        print(f"   🔍 DEBUG: Exception in extract_prediction_from_outputs: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -284,6 +328,16 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                     carry, outputs = wrapped_model(carry, single_batch, return_keys=[])
                     final_outputs = outputs  # Keep the last outputs for prediction extraction
                     
+                    # DEBUG: Print model output info on first step
+                    if step == 0:
+                        print(f"   🔍 DEBUG: Model call step {step}")
+                        print(f"   🔍 DEBUG: carry type: {type(carry)}")
+                        print(f"   🔍 DEBUG: outputs type: {type(outputs)}")
+                        if isinstance(outputs, dict):
+                            print(f"   🔍 DEBUG: outputs keys: {list(outputs.keys())}")
+                        else:
+                            print(f"   🔍 DEBUG: outputs value: {outputs}")
+                    
                     # Check if halted
                     if hasattr(carry, 'halted') and carry.halted.all():
                         halted = True
@@ -291,6 +345,13 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                     step += 1
             
             wrapped_model.recorder.stop_recording()
+            
+            # DEBUG: Print final outputs before prediction extraction
+            print(f"   🔍 DEBUG: Final inference complete. Steps taken: {step}")
+            print(f"   🔍 DEBUG: Halted: {halted}")
+            print(f"   🔍 DEBUG: final_outputs type: {type(final_outputs)}")
+            if isinstance(final_outputs, dict):
+                print(f"   🔍 DEBUG: final_outputs keys: {list(final_outputs.keys())}")
             
             # Extract final prediction and check correctness
             final_prediction = extract_prediction_from_outputs(final_outputs) if final_outputs else None
