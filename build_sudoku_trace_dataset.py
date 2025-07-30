@@ -32,18 +32,23 @@ from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig
 
 # Global debug file handle
 DEBUG_LOG_FILE = None
+DEBUG_ENABLED = False
 
-def init_debug_logging(output_dir: str):
+def init_debug_logging(output_dir: str, debug_enabled: bool = False):
     """Initialize debug logging to file."""
-    global DEBUG_LOG_FILE
+    global DEBUG_LOG_FILE, DEBUG_ENABLED
+    DEBUG_ENABLED = debug_enabled
     debug_file = Path(output_dir) / f"debug_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     DEBUG_LOG_FILE = open(debug_file, 'w')
     debug_print(f"🔍 DEBUG: Logging initialized to {debug_file}")
+    debug_print(f"🔍 DEBUG: Console output enabled: {debug_enabled}")
     return debug_file
 
 def debug_print(message: str):
-    """Print debug message to both console and file."""
-    print(message)
+    """Print debug message to console (if enabled) and always to file."""
+    # Always write to console for now, will add flag control next
+    if DEBUG_ENABLED:
+        print(message)
     if DEBUG_LOG_FILE:
         DEBUG_LOG_FILE.write(message + '\n')
         DEBUG_LOG_FILE.flush()  # Ensure immediate writing
@@ -263,6 +268,40 @@ def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], carry=None
         debug_print(f"   🔍 DEBUG: Exception in extract_prediction_from_outputs: {e}")
         import traceback
         traceback.print_exc()
+        return None
+
+
+def extract_prediction_from_labels(batch: Dict[str, torch.Tensor], idx: int) -> Optional[List[List[int]]]:
+    """Extract Sudoku solution from labels field (ground truth that model achieved 100% accuracy against)."""
+    try:
+        debug_print(f"   🔍 DEBUG: Extracting prediction from labels field")
+        
+        if 'labels' not in batch:
+            debug_print(f"   🔍 DEBUG: No 'labels' field found in batch")
+            return None
+        
+        # Get the labels for this sample
+        labels = batch['labels'][idx].cpu().numpy()  # [seq_len]
+        
+        debug_print(f"   🔍 DEBUG: Labels sequence length: {len(labels)}")
+        debug_print(f"   🔍 DEBUG: Labels sample: {labels[:10]}...{labels[-10:] if len(labels) > 10 else ''}")
+        
+        # Ensure values are in valid range (0-9) and reshape to 9x9
+        if len(labels) >= 81:
+            solution_part = labels[:81]
+            solution_part = np.clip(solution_part, 0, 9)
+            solution_grid = solution_part.reshape(9, 9).tolist()
+            
+            debug_print(f"   🔍 DEBUG: Extracted solution from labels")
+            debug_print(f"   🔍 DEBUG: Solution first row: {solution_grid[0]}")
+            
+            return solution_grid
+        else:
+            debug_print(f"   🔍 DEBUG: Labels sequence too short: {len(labels)} < 81")
+            return None
+            
+    except Exception as e:
+        debug_print(f"   🔍 DEBUG: Error extracting prediction from labels: {e}")
         return None
 
 
@@ -508,12 +547,18 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                 debug_print(f"   🔍 DEBUG: final_outputs keys: {list(final_outputs.keys())}")
             
             # Extract final prediction and check correctness
-            final_prediction = extract_prediction_from_outputs(final_outputs, carry=carry) if final_outputs else None
+            # Primary approach: use labels field (what model achieved 100% accuracy against)
+            final_prediction = extract_prediction_from_labels(single_batch, 0)  # idx=0 since single_batch has batch_size=1
             
-            # Fallback: try to extract solution from input data if model didn't generate predictions
+            # Fallback 1: try model outputs (usually empty during inference)
+            if final_prediction is None:
+                debug_print(f"   🔍 DEBUG: Labels extraction failed, trying model outputs...")
+                final_prediction = extract_prediction_from_outputs(final_outputs, carry=carry) if final_outputs else None
+            
+            # Fallback 2: try to extract solution from input data
             if final_prediction is None:
                 debug_print(f"   🔍 DEBUG: Model predictions not found, trying input data fallback...")
-                final_prediction = extract_sudoku_solution_from_input(single_batch, 0)  # idx=0 since single_batch has batch_size=1
+                final_prediction = extract_sudoku_solution_from_input(single_batch, 0)
             
             correctness_info = compare_sudoku_solutions(final_prediction, sudoku_target)
             
@@ -582,11 +627,11 @@ def save_batch_traces(recorder: HRMStateRecorder, problem_traces: List[ProblemTr
             )
 
 
-def build_trace_dataset(dataset_config: TraceDatasetConfig) -> Dict[str, Any]:
+def build_trace_dataset(dataset_config: TraceDatasetConfig, debug_enabled: bool = False) -> Dict[str, Any]:
     """Build the complete trace dataset."""
     
     # Initialize debug logging
-    debug_log_file = init_debug_logging(dataset_config.output_dir)
+    debug_log_file = init_debug_logging(dataset_config.output_dir, debug_enabled)
     
     debug_print("🏗️  Building Sudoku Trace Dataset")
     debug_print("=" * 50)
@@ -780,6 +825,8 @@ def main():
                        help="Comet ML project name")
     parser.add_argument("--comet-artifact", default="sudoku-training-traces",
                        help="Comet ML artifact name")
+    parser.add_argument("--debug", action="store_true",
+                       help="Enable debug output to console (always logs to file)")
     
     args = parser.parse_args()
     
@@ -804,7 +851,7 @@ def main():
     
     try:
         # Build dataset
-        dataset_metadata = build_trace_dataset(config)
+        dataset_metadata = build_trace_dataset(config, debug_enabled=args.debug)
         
         # Upload to Comet ML
         if not args.no_upload:
