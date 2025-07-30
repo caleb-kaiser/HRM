@@ -23,10 +23,38 @@ from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
 from tqdm import tqdm
 from dataclasses import dataclass, asdict
+import datetime
 
 from hrm_state_recorder import HRMStateRecorder, HRMRecordingWrapper
 from eval_utils import load_eval_model
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig
+
+
+# Global debug file handle
+DEBUG_LOG_FILE = None
+
+def init_debug_logging(output_dir: str):
+    """Initialize debug logging to file."""
+    global DEBUG_LOG_FILE
+    debug_file = Path(output_dir) / f"debug_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    DEBUG_LOG_FILE = open(debug_file, 'w')
+    debug_print(f"🔍 DEBUG: Logging initialized to {debug_file}")
+    return debug_file
+
+def debug_print(message: str):
+    """Print debug message to both console and file."""
+    print(message)
+    if DEBUG_LOG_FILE:
+        DEBUG_LOG_FILE.write(message + '\n')
+        DEBUG_LOG_FILE.flush()  # Ensure immediate writing
+
+def close_debug_logging():
+    """Close debug logging file."""
+    global DEBUG_LOG_FILE
+    if DEBUG_LOG_FILE:
+        debug_print(f"🔍 DEBUG: Closing debug log")
+        DEBUG_LOG_FILE.close()
+        DEBUG_LOG_FILE = None
 
 
 @dataclass
@@ -58,10 +86,10 @@ def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple
     try:
         # Debug: Print available keys for troubleshooting
         if idx == 0:  # Only print for first sample to avoid spam
-            print(f"   Available batch keys: {list(batch.keys())}")
+            debug_print(f"   Available batch keys: {list(batch.keys())}")
             for key, value in batch.items():
                 if isinstance(value, torch.Tensor):
-                    print(f"   {key}: shape {value.shape}, dtype {value.dtype}")
+                    debug_print(f"   {key}: shape {value.shape}, dtype {value.dtype}")
         
         # Get the input for this sample
         inputs = batch['inputs'][idx].cpu().numpy()  # [seq_len]
@@ -98,16 +126,16 @@ def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple
                 # Last resort: use input as target (for now)
                 target_grid = input_grid.copy()
                 if idx == 0:  # Only warn once
-                    print(f"   Warning: No targets found, using input as fallback")
+                    debug_print(f"   Warning: No targets found, using input as fallback")
         
         return input_grid, target_grid
         
     except Exception as e:
         # More detailed error info
-        print(f"   Error in extract_sudoku_from_batch for sample {idx}: {e}")
-        print(f"   Batch keys: {list(batch.keys()) if batch else 'None'}")
+        debug_print(f"   Error in extract_sudoku_from_batch for sample {idx}: {e}")
+        debug_print(f"   Batch keys: {list(batch.keys()) if batch else 'None'}")
         if 'inputs' in batch:
-            print(f"   Input shape: {batch['inputs'].shape}")
+            debug_print(f"   Input shape: {batch['inputs'].shape}")
         raise
 
 
@@ -115,19 +143,19 @@ def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], seq_len: i
     """Extract the final Sudoku prediction from model outputs."""
     try:
         # DEBUG: Print detailed information about outputs
-        print(f"   🔍 DEBUG: extract_prediction_from_outputs called")
-        print(f"   🔍 DEBUG: outputs type: {type(outputs)}")
+        debug_print(f"   🔍 DEBUG: extract_prediction_from_outputs called")
+        debug_print(f"   🔍 DEBUG: outputs type: {type(outputs)}")
         
         if isinstance(outputs, dict):
-            print(f"   🔍 DEBUG: outputs keys: {list(outputs.keys())}")
+            debug_print(f"   🔍 DEBUG: outputs keys: {list(outputs.keys())}")
             for key, value in outputs.items():
                 value_type = type(value)
                 if hasattr(value, 'shape'):
-                    print(f"   🔍 DEBUG: {key}: type={value_type}, shape={value.shape}, dtype={getattr(value, 'dtype', 'unknown')}")
+                    debug_print(f"   🔍 DEBUG: {key}: type={value_type}, shape={value.shape}, dtype={getattr(value, 'dtype', 'unknown')}")
                 else:
-                    print(f"   🔍 DEBUG: {key}: type={value_type}, value={value}")
+                    debug_print(f"   🔍 DEBUG: {key}: type={value_type}, value={value}")
         else:
-            print(f"   🔍 DEBUG: outputs is not a dict: {outputs}")
+            debug_print(f"   🔍 DEBUG: outputs is not a dict: {outputs}")
             return None
         
         # The outputs typically contain 'preds' or 'logits'
@@ -137,61 +165,61 @@ def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], seq_len: i
         if 'preds' in outputs:
             predictions = outputs['preds']
             predictions_key = 'preds'
-            print(f"   🔍 DEBUG: Found predictions in 'preds' key")
+            debug_print(f"   🔍 DEBUG: Found predictions in 'preds' key")
         elif 'logits' in outputs:
             # Convert logits to predictions
             predictions = torch.argmax(outputs['logits'], dim=-1)
             predictions_key = 'logits'
-            print(f"   🔍 DEBUG: Found predictions in 'logits' key, converted with argmax")
+            debug_print(f"   🔍 DEBUG: Found predictions in 'logits' key, converted with argmax")
         elif 'predictions' in outputs:
             predictions = outputs['predictions']
             predictions_key = 'predictions'
-            print(f"   🔍 DEBUG: Found predictions in 'predictions' key")
+            debug_print(f"   🔍 DEBUG: Found predictions in 'predictions' key")
         else:
             # Fallback: look for any tensor that could be predictions
-            print(f"   🔍 DEBUG: No standard prediction keys found, trying fallback...")
+            debug_print(f"   🔍 DEBUG: No standard prediction keys found, trying fallback...")
             for key, value in outputs.items():
                 if isinstance(value, torch.Tensor) and value.numel() > 0:
-                    print(f"   🔍 DEBUG: Checking tensor {key}: shape={value.shape}, dtype={value.dtype}")
+                    debug_print(f"   🔍 DEBUG: Checking tensor {key}: shape={value.shape}, dtype={value.dtype}")
                     if len(value.shape) >= 2:  # Has batch and sequence dimensions
-                        print(f"   🔍 DEBUG: Tensor {key} has 2+ dimensions, trying as predictions")
+                        debug_print(f"   🔍 DEBUG: Tensor {key} has 2+ dimensions, trying as predictions")
                         predictions = value
                         predictions_key = key
                         if predictions.dtype == torch.float:
-                            print(f"   🔍 DEBUG: Converting float tensor to predictions with argmax")
+                            debug_print(f"   🔍 DEBUG: Converting float tensor to predictions with argmax")
                             predictions = torch.argmax(predictions, dim=-1)
                         break
             
             if predictions is None:
-                print(f"   🔍 DEBUG: No suitable prediction tensor found")
+                debug_print(f"   🔍 DEBUG: No suitable prediction tensor found")
                 return None
         
-        print(f"   🔍 DEBUG: Using predictions from '{predictions_key}': shape={predictions.shape}, dtype={predictions.dtype}")
+        debug_print(f"   🔍 DEBUG: Using predictions from '{predictions_key}': shape={predictions.shape}, dtype={predictions.dtype}")
         
         # Extract first batch item and first seq_len tokens
         if predictions.dim() >= 2:
             pred_sequence = predictions[0, :seq_len].cpu().numpy()
-            print(f"   🔍 DEBUG: Extracted sequence from [0, :{seq_len}]: shape={pred_sequence.shape}")
+            debug_print(f"   🔍 DEBUG: Extracted sequence from [0, :{seq_len}]: shape={pred_sequence.shape}")
         else:
             pred_sequence = predictions[:seq_len].cpu().numpy()
-            print(f"   🔍 DEBUG: Extracted sequence from [:{seq_len}]: shape={pred_sequence.shape}")
+            debug_print(f"   🔍 DEBUG: Extracted sequence from [:{seq_len}]: shape={pred_sequence.shape}")
         
         # Ensure values are in valid range (0-9)
         pred_sequence = np.clip(pred_sequence, 0, 9)
-        print(f"   🔍 DEBUG: Clipped values to 0-9 range")
+        debug_print(f"   🔍 DEBUG: Clipped values to 0-9 range")
         
         # Reshape to 9x9 grid
         if len(pred_sequence) >= 81:
             prediction_grid = pred_sequence[:81].reshape(9, 9).tolist()
-            print(f"   🔍 DEBUG: Successfully reshaped to 9x9 grid")
-            print(f"   🔍 DEBUG: First row of prediction: {prediction_grid[0]}")
+            debug_print(f"   🔍 DEBUG: Successfully reshaped to 9x9 grid")
+            debug_print(f"   🔍 DEBUG: First row of prediction: {prediction_grid[0]}")
             return prediction_grid
         else:
-            print(f"   🔍 DEBUG: Sequence too short: {len(pred_sequence)} < 81")
+            debug_print(f"   🔍 DEBUG: Sequence too short: {len(pred_sequence)} < 81")
             return None
             
     except Exception as e:
-        print(f"   🔍 DEBUG: Exception in extract_prediction_from_outputs: {e}")
+        debug_print(f"   🔍 DEBUG: Exception in extract_prediction_from_outputs: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -280,7 +308,7 @@ def create_sudoku_dataloader(config, dataset_config: TraceDatasetConfig):
         
         return dataset
     except Exception as e:
-        print(f"❌ Failed to create dataloader: {e}")
+        debug_print(f"❌ Failed to create dataloader: {e}")
         raise
 
 
@@ -308,7 +336,7 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
             try:
                 sudoku_input, sudoku_target = extract_sudoku_from_batch(batch, sample_idx)
             except Exception as e:
-                print(f"⚠️  Error extracting Sudoku from problem {problem_id}: {e}")
+                debug_print(f"⚠️  Error extracting Sudoku from problem {problem_id}: {e}")
                 continue
             
             # Initialize model state
@@ -330,13 +358,13 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                     
                     # DEBUG: Print model output info on first step
                     if step == 0:
-                        print(f"   🔍 DEBUG: Model call step {step}")
-                        print(f"   🔍 DEBUG: carry type: {type(carry)}")
-                        print(f"   🔍 DEBUG: outputs type: {type(outputs)}")
+                        debug_print(f"   🔍 DEBUG: Model call step {step}")
+                        debug_print(f"   🔍 DEBUG: carry type: {type(carry)}")
+                        debug_print(f"   🔍 DEBUG: outputs type: {type(outputs)}")
                         if isinstance(outputs, dict):
-                            print(f"   🔍 DEBUG: outputs keys: {list(outputs.keys())}")
+                            debug_print(f"   🔍 DEBUG: outputs keys: {list(outputs.keys())}")
                         else:
-                            print(f"   🔍 DEBUG: outputs value: {outputs}")
+                            debug_print(f"   🔍 DEBUG: outputs value: {outputs}")
                     
                     # Check if halted
                     if hasattr(carry, 'halted') and carry.halted.all():
@@ -347,11 +375,11 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
             wrapped_model.recorder.stop_recording()
             
             # DEBUG: Print final outputs before prediction extraction
-            print(f"   🔍 DEBUG: Final inference complete. Steps taken: {step}")
-            print(f"   🔍 DEBUG: Halted: {halted}")
-            print(f"   🔍 DEBUG: final_outputs type: {type(final_outputs)}")
+            debug_print(f"   🔍 DEBUG: Final inference complete. Steps taken: {step}")
+            debug_print(f"   🔍 DEBUG: Halted: {halted}")
+            debug_print(f"   🔍 DEBUG: final_outputs type: {type(final_outputs)}")
             if isinstance(final_outputs, dict):
-                print(f"   🔍 DEBUG: final_outputs keys: {list(final_outputs.keys())}")
+                debug_print(f"   🔍 DEBUG: final_outputs keys: {list(final_outputs.keys())}")
             
             # Extract final prediction and check correctness
             final_prediction = extract_prediction_from_outputs(final_outputs) if final_outputs else None
@@ -389,7 +417,7 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
             problem_traces.append(problem_trace)
             
         except Exception as e:
-            print(f"⚠️  Error processing problem {problem_id}: {e}")
+            debug_print(f"⚠️  Error processing problem {problem_id}: {e}")
             continue
     
     return problem_traces
@@ -424,27 +452,32 @@ def save_batch_traces(recorder: HRMStateRecorder, problem_traces: List[ProblemTr
 
 def build_trace_dataset(dataset_config: TraceDatasetConfig) -> Dict[str, Any]:
     """Build the complete trace dataset."""
-    print("🏗️  Building Sudoku Trace Dataset")
-    print("=" * 50)
-    print(f"📁 Output directory: {dataset_config.output_dir}")
-    print(f"🔢 Batch size: {dataset_config.batch_size}")
-    print(f"📊 Max problems: {dataset_config.max_problems or 'All'}")
-    print(f"⚡ Max steps per problem: {dataset_config.max_steps_per_problem}")
-    print(f"💾 Tensor format: {dataset_config.tensor_format}")
+    
+    # Initialize debug logging
+    debug_log_file = init_debug_logging(dataset_config.output_dir)
+    
+    debug_print("🏗️  Building Sudoku Trace Dataset")
+    debug_print("=" * 50)
+    debug_print(f"📁 Output directory: {dataset_config.output_dir}")
+    debug_print(f"🔢 Batch size: {dataset_config.batch_size}")
+    debug_print(f"📊 Max problems: {dataset_config.max_problems or 'All'}")
+    debug_print(f"⚡ Max steps per problem: {dataset_config.max_steps_per_problem}")
+    debug_print(f"💾 Tensor format: {dataset_config.tensor_format}")
+    debug_print(f"📝 Debug log: {debug_log_file}")
     
     # Create output directory
     output_dir = Path(dataset_config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Load model
-    print(f"\n🤖 Loading model from {dataset_config.checkpoint_path}")
+    debug_print(f"\n🤖 Loading model from {dataset_config.checkpoint_path}")
     model, config, metadata = load_eval_model(dataset_config.checkpoint_path)
-    print(f"✅ Model loaded successfully")
+    debug_print(f"✅ Model loaded successfully")
     
     # Create dataloader
-    print(f"\n📊 Creating dataloader...")
+    debug_print(f"\n📊 Creating dataloader...")
     dataloader = create_sudoku_dataloader(config, dataset_config)
-    print(f"✅ Dataloader created")
+    debug_print(f"✅ Dataloader created")
     
     # Setup recording
     recorder = HRMStateRecorder(device="cuda")
@@ -455,7 +488,7 @@ def build_trace_dataset(dataset_config: TraceDatasetConfig) -> Dict[str, Any]:
     problem_offset = 0
     processed_batches = 0
     
-    print(f"\n🔄 Processing dataset...")
+    debug_print(f"\n🔄 Processing dataset...")
     
     try:
         for batch_data in tqdm(dataloader, desc="Processing batches"):
@@ -477,18 +510,18 @@ def build_trace_dataset(dataset_config: TraceDatasetConfig) -> Dict[str, Any]:
             # Check if we've hit our limit
             if (dataset_config.max_problems and 
                 len(all_problem_traces) >= dataset_config.max_problems):
-                print(f"🎯 Reached max problems limit: {dataset_config.max_problems}")
+                debug_print(f"🎯 Reached max problems limit: {dataset_config.max_problems}")
                 break
                 
             # Periodic updates
             if processed_batches % 10 == 0:
-                print(f"📈 Processed {len(all_problem_traces)} problems so far...")
+                debug_print(f"📈 Processed {len(all_problem_traces)} problems so far...")
     
     except KeyboardInterrupt:
-        print(f"\n⚠️  Interrupted by user. Saving progress...")
+        debug_print(f"\n⚠️  Interrupted by user. Saving progress...")
     
     except Exception as e:
-        print(f"❌ Error during processing: {e}")
+        debug_print(f"❌ Error during processing: {e}")
         raise
     
     # Save dataset metadata
@@ -505,17 +538,18 @@ def build_trace_dataset(dataset_config: TraceDatasetConfig) -> Dict[str, Any]:
     with open(metadata_file, 'w') as f:
         json.dump(dataset_metadata, f, indent=2)
     
-    print(f"\n✅ Dataset building completed!")
-    print(f"   📊 Total problems processed: {len(all_problem_traces)}")
-    print(f"   ✅ Successful traces: {dataset_metadata['successful_traces']}")
-    print(f"   💾 Metadata saved to: {metadata_file}")
+    debug_print(f"\n✅ Dataset building completed!")
+    debug_print(f"   📊 Total problems processed: {len(all_problem_traces)}")
+    debug_print(f"   ✅ Successful traces: {dataset_metadata['successful_traces']}")
+    debug_print(f"   💾 Metadata saved to: {metadata_file}")
+    debug_print(f"   📝 Debug log saved to: {debug_log_file}")
     
     return dataset_metadata
 
 
 def upload_to_comet(dataset_config: TraceDatasetConfig, dataset_metadata: Dict[str, Any]):
     """Upload the dataset to Comet ML."""
-    print(f"\n🚀 Uploading dataset to Comet ML...")
+    debug_print(f"\n🚀 Uploading dataset to Comet ML...")
     
     try:
         import comet_ml
@@ -570,22 +604,22 @@ def upload_to_comet(dataset_config: TraceDatasetConfig, dataset_metadata: Dict[s
                 )
         
         # Upload artifact
-        print(f"📤 Uploading artifact with {len(list(traces_dir.glob('*')))} trace files...")
+        debug_print(f"📤 Uploading artifact with {len(list(traces_dir.glob('*')))} trace files...")
         experiment.log_artifact(artifact)
         
-        print(f"✅ Successfully uploaded to Comet ML!")
-        print(f"   🌐 Experiment: {experiment.url}")
-        print(f"   📦 Artifact: {dataset_config.comet_artifact_name}")
+        debug_print(f"✅ Successfully uploaded to Comet ML!")
+        debug_print(f"   🌐 Experiment: {experiment.url}")
+        debug_print(f"   📦 Artifact: {dataset_config.comet_artifact_name}")
         
         experiment.end()
         return experiment.url
         
     except ImportError:
-        print("⚠️  Comet ML not available. Skipping upload.")
-        print("   Install with: pip install comet_ml")
+        debug_print("⚠️  Comet ML not available. Skipping upload.")
+        debug_print("   Install with: pip install comet_ml")
         return None
     except Exception as e:
-        print(f"❌ Failed to upload to Comet: {e}")
+        debug_print(f"❌ Failed to upload to Comet: {e}")
         return None
 
 
@@ -619,8 +653,8 @@ def main():
     
     # Validate checkpoint
     if not Path(args.checkpoint).exists():
-        print(f"❌ Checkpoint not found: {args.checkpoint}")
-        print("   Please run download_models.py first or specify correct checkpoint path")
+        debug_print(f"❌ Checkpoint not found: {args.checkpoint}")
+        debug_print("   Please run download_models.py first or specify correct checkpoint path")
         return 1
     
     # Create configuration
@@ -644,20 +678,28 @@ def main():
         if not args.no_upload:
             comet_url = upload_to_comet(config, dataset_metadata)
             if comet_url:
-                print(f"\n🎯 Next Steps:")
-                print(f"   1. Explore dataset: {args.output_dir}")
-                print(f"   2. View on Comet: {comet_url}")
-                print(f"   3. Use for analysis: load traces from {args.output_dir}/traces/")
+                debug_print(f"\n🎯 Next Steps:")
+                debug_print(f"   1. Explore dataset: {args.output_dir}")
+                debug_print(f"   2. View on Comet: {comet_url}")
+                debug_print(f"   3. Use for analysis: load traces from {args.output_dir}/traces/")
         else:
-            print(f"\n💾 Dataset saved locally to: {args.output_dir}")
+            debug_print(f"\n💾 Dataset saved locally to: {args.output_dir}")
         
-        print(f"\n🎉 Sudoku trace dataset building completed!")
+        debug_print(f"\n🎉 Sudoku trace dataset building completed!")
+        
+        # Close debug logging
+        close_debug_logging()
+        
         return 0
         
     except Exception as e:
-        print(f"❌ Dataset building failed: {e}")
+        debug_print(f"❌ Dataset building failed: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Ensure debug logging is closed even on error
+        close_debug_logging()
+        
         return 1
 
 
