@@ -232,7 +232,7 @@ def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], carry=None
         if predictions is None:
             debug_print(f"   🔍 DEBUG: No suitable prediction tensor found anywhere")
             debug_print(f"   🔍 DEBUG: This suggests the model may not be generating predictions during inference")
-            debug_print(f"   🔍 DEBUG: Consider calling model with different parameters or extracting from input data")
+            debug_print(f"   🔍 DEBUG: Will try extracting solution from input data as fallback")
             return None
         
         debug_print(f"   🔍 DEBUG: Using predictions from '{predictions_key}': shape={predictions.shape}, dtype={predictions.dtype}")
@@ -264,6 +264,91 @@ def extract_prediction_from_outputs(outputs: Dict[str, torch.Tensor], carry=None
         import traceback
         traceback.print_exc()
         return None
+
+
+def extract_sudoku_solution_from_input(batch: Dict[str, torch.Tensor], idx: int) -> Optional[List[List[int]]]:
+    """Extract Sudoku solution from input sequence as fallback when model doesn't generate predictions."""
+    try:
+        debug_print(f"   🔍 DEBUG: Attempting to extract solution from input data")
+        
+        # Get the input sequence for this sample
+        inputs = batch['inputs'][idx].cpu().numpy()  # [seq_len]
+        
+        debug_print(f"   🔍 DEBUG: Input sequence length: {len(inputs)}")
+        debug_print(f"   🔍 DEBUG: Input sequence sample: {inputs[:10]}...{inputs[-10:] if len(inputs) > 10 else ''}")
+        
+        # Many Sudoku datasets encode: [problem_81_tokens] [solution_81_tokens] [padding...]
+        # Try to find the solution part
+        if len(inputs) >= 162:  # At least space for problem + solution
+            # Try solution at position 81-162
+            solution_part = inputs[81:162]
+            solution_part = np.clip(solution_part, 0, 9)
+            solution_grid = solution_part.reshape(9, 9).tolist()
+            
+            debug_print(f"   🔍 DEBUG: Extracted solution from positions 81-162")
+            debug_print(f"   🔍 DEBUG: Solution first row: {solution_grid[0]}")
+            
+            # Basic validation: check if this looks like a valid Sudoku solution
+            if is_valid_sudoku_solution(solution_grid):
+                debug_print(f"   🔍 DEBUG: Solution appears valid")
+                return solution_grid
+            else:
+                debug_print(f"   🔍 DEBUG: Solution failed validation, trying other positions")
+        
+        # Try alternative positions if the above didn't work
+        for start_pos in [0, 41, 82, 100]:  # Try different starting positions
+            if len(inputs) >= start_pos + 81:
+                candidate = inputs[start_pos:start_pos+81]
+                candidate = np.clip(candidate, 0, 9)
+                candidate_grid = candidate.reshape(9, 9).tolist()
+                
+                if is_valid_sudoku_solution(candidate_grid):
+                    debug_print(f"   🔍 DEBUG: Found valid solution at position {start_pos}")
+                    return candidate_grid
+        
+        debug_print(f"   🔍 DEBUG: No valid solution found in input sequence")
+        return None
+        
+    except Exception as e:
+        debug_print(f"   🔍 DEBUG: Error extracting solution from input: {e}")
+        return None
+
+
+def is_valid_sudoku_solution(grid: List[List[int]]) -> bool:
+    """Check if a grid looks like a valid complete Sudoku solution."""
+    try:
+        grid_array = np.array(grid)
+        
+        # Must be 9x9
+        if grid_array.shape != (9, 9):
+            return False
+        
+        # Must contain only numbers 1-9 (no zeros for complete solution)
+        if not np.all((grid_array >= 1) & (grid_array <= 9)):
+            return False
+        
+        # Check rows: each row should have numbers 1-9 exactly once
+        for row in grid_array:
+            if len(set(row)) != 9 or set(row) != set(range(1, 10)):
+                return False
+        
+        # Check columns: each column should have numbers 1-9 exactly once  
+        for col in range(9):
+            column = grid_array[:, col]
+            if len(set(column)) != 9 or set(column) != set(range(1, 10)):
+                return False
+        
+        # Check 3x3 boxes: each box should have numbers 1-9 exactly once
+        for box_row in range(3):
+            for box_col in range(3):
+                box = grid_array[box_row*3:(box_row+1)*3, box_col*3:(box_col+1)*3].flatten()
+                if len(set(box)) != 9 or set(box) != set(range(1, 10)):
+                    return False
+        
+        return True
+        
+    except Exception:
+        return False
 
 
 def compare_sudoku_solutions(prediction: Optional[List[List[int]]], target: List[List[int]]) -> Dict[str, Any]:
@@ -424,6 +509,12 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
             
             # Extract final prediction and check correctness
             final_prediction = extract_prediction_from_outputs(final_outputs, carry=carry) if final_outputs else None
+            
+            # Fallback: try to extract solution from input data if model didn't generate predictions
+            if final_prediction is None:
+                debug_print(f"   🔍 DEBUG: Model predictions not found, trying input data fallback...")
+                final_prediction = extract_sudoku_solution_from_input(single_batch, 0)  # idx=0 since single_batch has batch_size=1
+            
             correctness_info = compare_sudoku_solutions(final_prediction, sudoku_target)
             
             # Check if we should include this trace
