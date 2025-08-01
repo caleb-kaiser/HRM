@@ -86,6 +86,19 @@ class TraceDatasetConfig:
     comet_artifact_name: str = "sudoku-training-traces"
 
 
+def decode_sudoku_values(encoded_values: np.ndarray) -> np.ndarray:
+    """Decode Sudoku values from dataset encoding back to standard format.
+    
+    Dataset encoding: 0=PAD, 1=empty, 2-10=digits 1-9
+    Standard format:  0=empty, 1-9=digits
+    """
+    # Subtract 1 to convert back to 0-9 range
+    decoded = encoded_values - 1
+    # Ensure values are in valid range
+    decoded = np.clip(decoded, 0, 9)
+    return decoded
+
+
 def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple[List[List[int]], List[List[int]]]:
     """Extract a single Sudoku problem and solution from a batch."""
     try:
@@ -96,7 +109,7 @@ def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple
                 if isinstance(value, torch.Tensor):
                     debug_print(f"   {key}: shape {value.shape}, dtype {value.dtype}")
         
-        # Get the input for this sample
+        # Get the input and target for this sample
         inputs = batch['inputs'][idx].cpu().numpy()  # [seq_len]
         
         # Try to get targets - handle different possible key names
@@ -108,30 +121,25 @@ def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple
                 targets = batch[target_key][idx].cpu().numpy()
                 break
         
-        # Convert from flattened representation back to 9x9 grid
-        # Extract input grid (first 81 positions, assuming 0-10 vocabulary)
-        # Filter out special tokens (padding, etc.) and keep only 0-9
-        valid_inputs = inputs[:81]  # Take first 81 tokens
-        valid_inputs = np.clip(valid_inputs, 0, 9)  # Ensure values are 0-9
-        input_grid = valid_inputs.reshape(9, 9).tolist()
+        debug_print(f"   🔍 DEBUG: Raw inputs sample: {inputs[:10]}...{inputs[-10:] if len(inputs) > 10 else ''}")
+        if targets is not None:
+            debug_print(f"   🔍 DEBUG: Raw targets sample: {targets[:10]}...{targets[-10:] if len(targets) > 10 else ''}")
         
-        # Extract target grid
+        # Decode the values from dataset encoding to standard Sudoku format
+        decoded_inputs = decode_sudoku_values(inputs[:81])
+        input_grid = decoded_inputs.reshape(9, 9).tolist()
+        
         if targets is not None and len(targets) >= 81:
-            valid_targets = targets[:81]
-            valid_targets = np.clip(valid_targets, 0, 9)  # Ensure values are 0-9
-            target_grid = valid_targets.reshape(9, 9).tolist()
+            decoded_targets = decode_sudoku_values(targets[:81])
+            target_grid = decoded_targets.reshape(9, 9).tolist()
         else:
-            # Fallback: try to extract solution from input sequence
-            # Some datasets encode the solution after the input
-            if len(inputs) >= 162:  # Input + solution
-                solution_part = inputs[81:162]
-                solution_part = np.clip(solution_part, 0, 9)
-                target_grid = solution_part.reshape(9, 9).tolist()
-            else:
-                # Last resort: use input as target (for now)
-                target_grid = input_grid.copy()
-                if idx == 0:  # Only warn once
-                    debug_print(f"   Warning: No targets found, using input as fallback")
+            # Fallback: use input as target (shouldn't happen with proper dataset)
+            target_grid = input_grid.copy()
+            if idx == 0:  # Only warn once
+                debug_print(f"   Warning: No targets found, using input as fallback")
+        
+        debug_print(f"   🔍 DEBUG: Decoded input first row: {input_grid[0]}")
+        debug_print(f"   🔍 DEBUG: Decoded target first row: {target_grid[0]}")
         
         return input_grid, target_grid
         
@@ -284,16 +292,15 @@ def extract_prediction_from_labels(batch: Dict[str, torch.Tensor], idx: int) -> 
         labels = batch['labels'][idx].cpu().numpy()  # [seq_len]
         
         debug_print(f"   🔍 DEBUG: Labels sequence length: {len(labels)}")
-        debug_print(f"   🔍 DEBUG: Labels sample: {labels[:10]}...{labels[-10:] if len(labels) > 10 else ''}")
+        debug_print(f"   🔍 DEBUG: Raw labels sample: {labels[:10]}...{labels[-10:] if len(labels) > 10 else ''}")
         
-        # Ensure values are in valid range (0-9) and reshape to 9x9
+        # Decode the values from dataset encoding to standard Sudoku format
         if len(labels) >= 81:
-            solution_part = labels[:81]
-            solution_part = np.clip(solution_part, 0, 9)
-            solution_grid = solution_part.reshape(9, 9).tolist()
+            decoded_labels = decode_sudoku_values(labels[:81])
+            solution_grid = decoded_labels.reshape(9, 9).tolist()
             
             debug_print(f"   🔍 DEBUG: Extracted solution from labels")
-            debug_print(f"   🔍 DEBUG: Solution first row: {solution_grid[0]}")
+            debug_print(f"   🔍 DEBUG: Decoded solution first row: {solution_grid[0]}")
             
             return solution_grid
         else:
@@ -314,39 +321,21 @@ def extract_sudoku_solution_from_input(batch: Dict[str, torch.Tensor], idx: int)
         inputs = batch['inputs'][idx].cpu().numpy()  # [seq_len]
         
         debug_print(f"   🔍 DEBUG: Input sequence length: {len(inputs)}")
-        debug_print(f"   🔍 DEBUG: Input sequence sample: {inputs[:10]}...{inputs[-10:] if len(inputs) > 10 else ''}")
+        debug_print(f"   🔍 DEBUG: Raw input sequence sample: {inputs[:10]}...{inputs[-10:] if len(inputs) > 10 else ''}")
         
-        # Many Sudoku datasets encode: [problem_81_tokens] [solution_81_tokens] [padding...]
-        # Try to find the solution part
-        if len(inputs) >= 162:  # At least space for problem + solution
-            # Try solution at position 81-162
-            solution_part = inputs[81:162]
-            solution_part = np.clip(solution_part, 0, 9)
-            solution_grid = solution_part.reshape(9, 9).tolist()
+        # Decode the first 81 values (should be the problem)
+        if len(inputs) >= 81:
+            decoded_inputs = decode_sudoku_values(inputs[:81])
+            input_grid = decoded_inputs.reshape(9, 9).tolist()
             
-            debug_print(f"   🔍 DEBUG: Extracted solution from positions 81-162")
-            debug_print(f"   🔍 DEBUG: Solution first row: {solution_grid[0]}")
+            debug_print(f"   🔍 DEBUG: Decoded input as grid")
+            debug_print(f"   🔍 DEBUG: Input first row: {input_grid[0]}")
             
-            # Basic validation: check if this looks like a valid Sudoku solution
-            if is_valid_sudoku_solution(solution_grid):
-                debug_print(f"   🔍 DEBUG: Solution appears valid")
-                return solution_grid
-            else:
-                debug_print(f"   🔍 DEBUG: Solution failed validation, trying other positions")
-        
-        # Try alternative positions if the above didn't work
-        for start_pos in [0, 41, 82, 100]:  # Try different starting positions
-            if len(inputs) >= start_pos + 81:
-                candidate = inputs[start_pos:start_pos+81]
-                candidate = np.clip(candidate, 0, 9)
-                candidate_grid = candidate.reshape(9, 9).tolist()
-                
-                if is_valid_sudoku_solution(candidate_grid):
-                    debug_print(f"   🔍 DEBUG: Found valid solution at position {start_pos}")
-                    return candidate_grid
-        
-        debug_print(f"   🔍 DEBUG: No valid solution found in input sequence")
-        return None
+            # This is just the problem, not the solution, but return it as fallback
+            return input_grid
+        else:
+            debug_print(f"   🔍 DEBUG: Input sequence too short: {len(inputs)} < 81")
+            return None
         
     except Exception as e:
         debug_print(f"   🔍 DEBUG: Error extracting solution from input: {e}")
