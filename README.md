@@ -244,3 +244,9 @@ python analyze_embeddings.py --base-path downloaded_comet_traces/tensors/trace_0
 - **Visualization plots**
 
 See [`COMET_INTEGRATION.md`](COMET_INTEGRATION.md) and [`HRM_STATE_RECORDING.md`](HRM_STATE_RECORDING.md) for detailed guides.
+
+
+
+## GET STARTED
+
+Run install everything + flash_attn. run python download_models.py. run the dataset generating scripts.

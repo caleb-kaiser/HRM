@@ -38,7 +38,12 @@ def init_debug_logging(output_dir: str, debug_enabled: bool = False):
     """Initialize debug logging to file."""
     global DEBUG_LOG_FILE, DEBUG_ENABLED
     DEBUG_ENABLED = debug_enabled
-    debug_file = Path(output_dir) / f"debug_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    
+    # Ensure output directory exists before creating debug file
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    debug_file = output_path / f"debug_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     DEBUG_LOG_FILE = open(debug_file, 'w')
     debug_print(f"🔍 DEBUG: Logging initialized to {debug_file}")
     debug_print(f"🔍 DEBUG: Console output enabled: {debug_enabled}")
