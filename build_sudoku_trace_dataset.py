@@ -122,24 +122,42 @@ def extract_sudoku_from_batch(batch: Dict[str, torch.Tensor], idx: int) -> Tuple
                 break
         
         debug_print(f"   🔍 DEBUG: Raw inputs sample: {inputs[:10]}...{inputs[-10:] if len(inputs) > 10 else ''}")
+        debug_print(f"   🔍 DEBUG: Raw inputs range: {inputs.min()}-{inputs.max()}")
         if targets is not None:
             debug_print(f"   🔍 DEBUG: Raw targets sample: {targets[:10]}...{targets[-10:] if len(targets) > 10 else ''}")
+            debug_print(f"   🔍 DEBUG: Raw targets range: {targets.min()}-{targets.max()}")
         
-        # Decode the values from dataset encoding to standard Sudoku format
-        decoded_inputs = decode_sudoku_values(inputs[:81])
-        input_grid = decoded_inputs.reshape(9, 9).tolist()
+        # TEST: Try without decoding first to see what the raw data looks like
+        raw_input_grid = inputs[:81].reshape(9, 9)
+        debug_print(f"   🔍 DEBUG: Raw input grid first row: {raw_input_grid[0]}")
         
         if targets is not None and len(targets) >= 81:
-            decoded_targets = decode_sudoku_values(targets[:81])
-            target_grid = decoded_targets.reshape(9, 9).tolist()
+            raw_target_grid = targets[:81].reshape(9, 9)
+            debug_print(f"   🔍 DEBUG: Raw target grid first row: {raw_target_grid[0]}")
+            
+            # Check if raw target is already a valid Sudoku (range 0-9)
+            if np.all((raw_target_grid >= 0) & (raw_target_grid <= 9)):
+                debug_print(f"   🔍 DEBUG: Raw target appears to be in 0-9 range already!")
+                target_grid = raw_target_grid.tolist()
+            else:
+                debug_print(f"   🔍 DEBUG: Raw target in encoded range, applying decoding...")
+                decoded_targets = decode_sudoku_values(targets[:81])
+                target_grid = decoded_targets.reshape(9, 9).tolist()
         else:
-            # Fallback: use input as target (shouldn't happen with proper dataset)
-            target_grid = input_grid.copy()
-            if idx == 0:  # Only warn once
-                debug_print(f"   Warning: No targets found, using input as fallback")
+            debug_print(f"   🔍 DEBUG: No targets found, using input as fallback")
+            target_grid = raw_input_grid.tolist()
         
-        debug_print(f"   🔍 DEBUG: Decoded input first row: {input_grid[0]}")
-        debug_print(f"   🔍 DEBUG: Decoded target first row: {target_grid[0]}")
+        # Similar logic for input
+        if np.all((raw_input_grid >= 0) & (raw_input_grid <= 9)):
+            debug_print(f"   🔍 DEBUG: Raw input appears to be in 0-9 range already!")
+            input_grid = raw_input_grid.tolist()
+        else:
+            debug_print(f"   🔍 DEBUG: Raw input in encoded range, applying decoding...")
+            decoded_inputs = decode_sudoku_values(inputs[:81])
+            input_grid = decoded_inputs.reshape(9, 9).tolist()
+        
+        debug_print(f"   🔍 DEBUG: Final input first row: {input_grid[0]}")
+        debug_print(f"   🔍 DEBUG: Final target first row: {target_grid[0]}")
         
         return input_grid, target_grid
         
