@@ -105,16 +105,44 @@ def test_trace_data_format(trace_file: Path) -> Dict[str, Any]:
             if isinstance(value, torch.Tensor):
                 results["data_shapes"][key] = list(value.shape)
                 results["data_types"][key] = str(value.dtype)
-                results["tensor_info"][key] = {
+                
+                # Handle different tensor types safely
+                tensor_info = {
                     "shape": list(value.shape),
                     "dtype": str(value.dtype),
-                    "min": float(value.min().item()) if value.numel() > 0 else None,
-                    "max": float(value.max().item()) if value.numel() > 0 else None,
-                    "mean": float(value.mean().item()) if value.numel() > 0 else None,
                 }
-                print(f"   📊 {key}: shape={value.shape}, dtype={value.dtype}")
+                
                 if value.numel() > 0:
-                    print(f"      Range: [{value.min().item():.4f}, {value.max().item():.4f}], Mean: {value.mean().item():.4f}")
+                    if value.dtype == torch.bool:
+                        # Handle boolean tensors
+                        tensor_info["true_count"] = int(value.sum().item())
+                        tensor_info["false_count"] = int((~value).sum().item())
+                        tensor_info["true_ratio"] = float(value.float().mean().item())
+                        print(f"   📊 {key}: shape={value.shape}, dtype={value.dtype}")
+                        print(f"      True: {tensor_info['true_count']}, False: {tensor_info['false_count']}, Ratio: {tensor_info['true_ratio']:.4f}")
+                    elif value.dtype in [torch.int32, torch.int64, torch.int8, torch.int16]:
+                        # Handle integer tensors
+                        tensor_info["min"] = int(value.min().item())
+                        tensor_info["max"] = int(value.max().item())
+                        tensor_info["mean"] = float(value.float().mean().item())
+                        print(f"   📊 {key}: shape={value.shape}, dtype={value.dtype}")
+                        print(f"      Range: [{tensor_info['min']}, {tensor_info['max']}], Mean: {tensor_info['mean']:.4f}")
+                    elif value.dtype in [torch.float32, torch.float64, torch.float16, torch.bfloat16]:
+                        # Handle floating point tensors
+                        tensor_info["min"] = float(value.min().item())
+                        tensor_info["max"] = float(value.max().item())
+                        tensor_info["mean"] = float(value.mean().item())
+                        print(f"   📊 {key}: shape={value.shape}, dtype={value.dtype}")
+                        print(f"      Range: [{tensor_info['min']:.4f}, {tensor_info['max']:.4f}], Mean: {tensor_info['mean']:.4f}")
+                    else:
+                        # Handle other tensor types
+                        print(f"   📊 {key}: shape={value.shape}, dtype={value.dtype}")
+                        print(f"      Unknown tensor type - skipping statistics")
+                else:
+                    print(f"   📊 {key}: shape={value.shape}, dtype={value.dtype} (empty)")
+                
+                results["tensor_info"][key] = tensor_info
+                
             elif isinstance(value, dict):
                 results["data_shapes"][key] = "dict"
                 results["data_types"][key] = "dict"
@@ -128,14 +156,14 @@ def test_trace_data_format(trace_file: Path) -> Dict[str, Any]:
         if 'h_states' in trace_data:
             h_states = trace_data['h_states']
             if h_states.dim() >= 2:
-                print(f"   ✅ H-states: {h_states.shape[0]} timesteps, {h_states.shape[1]} hidden dimensions")
+                print(f"   ✅ H-states: {h_states.shape[0]} timesteps, {h_states.shape[-1]} hidden dimensions")
             else:
                 print(f"   ❌ H-states: Invalid shape {h_states.shape}")
         
         if 'l_states' in trace_data:
             l_states = trace_data['l_states']
             if l_states.dim() >= 2:
-                print(f"   ✅ L-states: {l_states.shape[0]} timesteps, {l_states.shape[1]} hidden dimensions")
+                print(f"   ✅ L-states: {l_states.shape[0]} timesteps, {l_states.shape[-1]} hidden dimensions")
             else:
                 print(f"   ❌ L-states: Invalid shape {l_states.shape}")
         
@@ -150,6 +178,10 @@ def test_trace_data_format(trace_file: Path) -> Dict[str, Any]:
                     print(f"   ❌ Q-halt logits: Contains infinite/NaN values")
             else:
                 print(f"   ❌ Q-halt logits: Invalid shape {q_logits.shape}")
+        else:
+            print(f"   ❌ CRITICAL: Q-halt logits missing! This is essential for HRM analysis.")
+            print(f"      Available keys: {list(trace_data.keys())}")
+            print(f"      Check if HRMStateRecorder is properly capturing q_halt_logits")
         
         if 'metadata' in trace_data:
             metadata = trace_data['metadata']
@@ -165,6 +197,21 @@ def test_trace_data_format(trace_file: Path) -> Dict[str, Any]:
                         print(f"      ⚠️  Missing {field}")
             else:
                 print(f"   ❌ Metadata: Not a dict, got {type(metadata)}")
+        else:
+            print(f"   ❌ CRITICAL: Metadata missing! This should contain execution info.")
+            
+        # Additional analysis for unexpected but potentially useful fields
+        if 'halted' in trace_data:
+            halted = trace_data['halted']
+            print(f"   📋 Found 'halted' field: shape={halted.shape}, type={halted.dtype}")
+            
+        if 'steps' in trace_data:
+            steps = trace_data['steps']
+            print(f"   📋 Found 'steps' field: shape={steps.shape}, type={steps.dtype}")
+            
+        if 'is_h_update' in trace_data:
+            is_h_update = trace_data['is_h_update']
+            print(f"   📋 Found 'is_h_update' field: shape={is_h_update.shape}, type={is_h_update.dtype}")
         
     except Exception as e:
         print(f"   ❌ Failed to load/analyze trace: {e}")
