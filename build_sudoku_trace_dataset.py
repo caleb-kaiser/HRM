@@ -499,6 +499,10 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
     # Move batch to GPU
     batch_gpu = {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
     
+    # FIXED: Clear traces once per batch, not per sample
+    wrapped_model.recorder.clear_traces()  
+    wrapped_model.recorder.start_recording(model)
+    
     for sample_idx in range(batch_size):
         problem_id = problem_offset + sample_idx
         
@@ -520,10 +524,7 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
             with torch.device("cuda"):
                 carry = model.initial_carry(single_batch)
             
-            # Run inference with recording
-            wrapped_model.recorder.clear_traces()  # Clear previous traces
-            wrapped_model.recorder.start_recording(model)
-            
+            # Run inference with recording (NO clear_traces here!)
             final_outputs = None
             with torch.inference_mode():
                 step = 0
@@ -533,8 +534,8 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                     carry, outputs = wrapped_model(carry, single_batch, return_keys=[])
                     final_outputs = outputs  # Keep the last outputs for prediction extraction
                     
-                    # DEBUG: Print model output info on first step
-                    if step == 0:
+                    # DEBUG: Print model output info on first step of first sample only
+                    if step == 0 and sample_idx == 0:
                         debug_print(f"   🔍 DEBUG: Model call step {step}")
                         debug_print(f"   🔍 DEBUG: carry type: {type(carry)}")
                         debug_print(f"   🔍 DEBUG: outputs type: {type(outputs)}")
@@ -548,15 +549,6 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                         halted = True
                     
                     step += 1
-            
-            wrapped_model.recorder.stop_recording()
-            
-            # DEBUG: Print final outputs before prediction extraction
-            debug_print(f"   🔍 DEBUG: Final inference complete. Steps taken: {step}")
-            debug_print(f"   🔍 DEBUG: Halted: {halted}")
-            debug_print(f"   🔍 DEBUG: final_outputs type: {type(final_outputs)}")
-            if isinstance(final_outputs, dict):
-                debug_print(f"   🔍 DEBUG: final_outputs keys: {list(final_outputs.keys())}")
             
             # Extract final prediction and check correctness
             # Primary approach: use labels field (what model achieved 100% accuracy against)
@@ -579,9 +571,9 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                 # Model didn't halt - might be a failed solve
                 continue
             
-            # Save trace tensors
-            trace_filename = f"trace_{problem_id:06d}"
-            trace_file_path = Path(dataset_config.output_dir) / "traces" / f"{trace_filename}.{dataset_config.tensor_format}"
+            # FIXED: Create correct trace file name that matches save_traces_with_tensors output
+            trace_filename = f"trace_{problem_id:06d}_trace_{sample_idx}"
+            trace_file_path = f"{dataset_config.output_dir}/traces/{trace_filename}.{dataset_config.tensor_format}"
             
             # Create problem trace metadata
             problem_trace = ProblemTrace(
@@ -600,7 +592,7 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                     "valid_sudoku": correctness_info["valid_sudoku"],
                     "final_prediction": final_prediction,
                 },
-                trace_file=str(trace_file_path)
+                trace_file=trace_file_path
             )
             
             problem_traces.append(problem_trace)
@@ -608,6 +600,12 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
         except Exception as e:
             debug_print(f"⚠️  Error processing problem {problem_id}: {e}")
             continue
+    
+    # FIXED: Stop recording once per batch after all samples processed
+    wrapped_model.recorder.stop_recording()
+    
+    # DEBUG: Print final batch info
+    debug_print(f"   🔍 DEBUG: Batch complete. Recorded {len(wrapped_model.recorder.traces)} traces for {len(problem_traces)} problems")
     
     return problem_traces
 
@@ -622,7 +620,10 @@ def save_batch_traces(recorder: HRMStateRecorder, problem_traces: List[ProblemTr
     traces_dir = output_dir / "traces"
     traces_dir.mkdir(parents=True, exist_ok=True)
     
-    # Save individual trace files
+    debug_print(f"   🔍 DEBUG: Saving {len(problem_traces)} problem traces with {len(recorder.traces)} recorded traces")
+    
+    # FIXED: Now that we accumulate all traces in the recorder, save them individually
+    # Each trace corresponds to one problem in the batch
     for i, problem_trace in enumerate(problem_traces):
         if i < len(recorder.traces):
             trace = recorder.traces[i]
@@ -631,12 +632,25 @@ def save_batch_traces(recorder: HRMStateRecorder, problem_traces: List[ProblemTr
             temp_recorder = HRMStateRecorder()
             temp_recorder.traces = [trace]
             
-            # Save trace tensors
-            trace_base = Path(problem_trace.trace_file).with_suffix('')
+            # FIXED: Use the problem_id to create the base filename, then save_traces_with_tensors will add the suffix
+            problem_id = problem_trace.problem_id
+            trace_base = traces_dir / f"trace_{problem_id:06d}"
+            
+            # Save trace tensors - this will create trace_XXXXXX_trace_0.pt
             temp_recorder.save_traces_with_tensors(
                 str(trace_base), 
                 save_format=dataset_config.tensor_format
             )
+            
+            debug_print(f"   ✅ Saved trace for problem {problem_id}")
+        else:
+            debug_print(f"   ⚠️  No trace data for problem {problem_trace.problem_id} (index {i})")
+    
+    # Verify the number of traces matches
+    if len(problem_traces) != len(recorder.traces):
+        debug_print(f"   ⚠️  Mismatch: {len(problem_traces)} problems but {len(recorder.traces)} traces")
+    else:
+        debug_print(f"   ✅ Successfully saved all {len(problem_traces)} traces")
 
 
 def make_json_serializable(obj):
