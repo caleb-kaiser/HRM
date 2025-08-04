@@ -499,10 +499,7 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
     # Move batch to GPU
     batch_gpu = {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
     
-    # FIXED: Clear traces once per batch, not per sample
-    wrapped_model.recorder.clear_traces()  
-    wrapped_model.recorder.start_recording(model)
-    
+    # FIXED: Record each sample individually - this is how the recorder was designed to work
     for sample_idx in range(batch_size):
         problem_id = problem_offset + sample_idx
         
@@ -524,7 +521,11 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
             with torch.device("cuda"):
                 carry = model.initial_carry(single_batch)
             
-            # Run inference with recording (NO clear_traces here!)
+            # FIXED: Start recording for this specific sample
+            wrapped_model.recorder.clear_traces()
+            wrapped_model.recorder.start_recording(model)
+            
+            # Run inference with recording
             final_outputs = None
             with torch.inference_mode():
                 step = 0
@@ -550,6 +551,9 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                     
                     step += 1
             
+            # FIXED: Stop recording for this sample
+            wrapped_model.recorder.stop_recording()
+            
             # Extract final prediction and check correctness
             # Primary approach: use labels field (what model achieved 100% accuracy against)
             final_prediction = extract_prediction_from_labels(single_batch, 0)  # idx=0 since single_batch has batch_size=1
@@ -572,8 +576,22 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
                 continue
             
             # FIXED: Create correct trace file name that matches save_traces_with_tensors output
-            trace_filename = f"trace_{problem_id:06d}_trace_{sample_idx}"
+            # Since we record each sample individually, the trace will be saved as trace_0
+            trace_filename = f"trace_{problem_id:06d}_trace_0"
             trace_file_path = f"{dataset_config.output_dir}/traces/{trace_filename}.{dataset_config.tensor_format}"
+            
+            # Save the trace immediately for this sample
+            output_dir = Path(dataset_config.output_dir)
+            traces_dir = output_dir / "traces"
+            traces_dir.mkdir(parents=True, exist_ok=True)
+            
+            trace_base = traces_dir / f"trace_{problem_id:06d}"
+            wrapped_model.recorder.save_traces_with_tensors(
+                str(trace_base), 
+                save_format=dataset_config.tensor_format
+            )
+            
+            debug_print(f"   ✅ Saved trace for problem {problem_id}")
             
             # Create problem trace metadata
             problem_trace = ProblemTrace(
@@ -601,56 +619,10 @@ def process_batch(model, wrapped_model, batch: Dict[str, torch.Tensor],
             debug_print(f"⚠️  Error processing problem {problem_id}: {e}")
             continue
     
-    # FIXED: Stop recording once per batch after all samples processed
-    wrapped_model.recorder.stop_recording()
-    
     # DEBUG: Print final batch info
-    debug_print(f"   🔍 DEBUG: Batch complete. Recorded {len(wrapped_model.recorder.traces)} traces for {len(problem_traces)} problems")
+    debug_print(f"   🔍 DEBUG: Batch complete. Processed {len(problem_traces)} problems")
     
     return problem_traces
-
-
-def save_batch_traces(recorder: HRMStateRecorder, problem_traces: List[ProblemTrace], 
-                     dataset_config: TraceDatasetConfig):
-    """Save traces for a batch of problems."""
-    if not problem_traces:
-        return
-    
-    output_dir = Path(dataset_config.output_dir)
-    traces_dir = output_dir / "traces"
-    traces_dir.mkdir(parents=True, exist_ok=True)
-    
-    debug_print(f"   🔍 DEBUG: Saving {len(problem_traces)} problem traces with {len(recorder.traces)} recorded traces")
-    
-    # FIXED: Now that we accumulate all traces in the recorder, save them individually
-    # Each trace corresponds to one problem in the batch
-    for i, problem_trace in enumerate(problem_traces):
-        if i < len(recorder.traces):
-            trace = recorder.traces[i]
-            
-            # Create a temporary recorder with just this trace
-            temp_recorder = HRMStateRecorder()
-            temp_recorder.traces = [trace]
-            
-            # FIXED: Use the problem_id to create the base filename, then save_traces_with_tensors will add the suffix
-            problem_id = problem_trace.problem_id
-            trace_base = traces_dir / f"trace_{problem_id:06d}"
-            
-            # Save trace tensors - this will create trace_XXXXXX_trace_0.pt
-            temp_recorder.save_traces_with_tensors(
-                str(trace_base), 
-                save_format=dataset_config.tensor_format
-            )
-            
-            debug_print(f"   ✅ Saved trace for problem {problem_id}")
-        else:
-            debug_print(f"   ⚠️  No trace data for problem {problem_trace.problem_id} (index {i})")
-    
-    # Verify the number of traces matches
-    if len(problem_traces) != len(recorder.traces):
-        debug_print(f"   ⚠️  Mismatch: {len(problem_traces)} problems but {len(recorder.traces)} traces")
-    else:
-        debug_print(f"   ✅ Successfully saved all {len(problem_traces)} traces")
 
 
 def make_json_serializable(obj):
@@ -718,13 +690,10 @@ def build_trace_dataset(dataset_config: TraceDatasetConfig, debug_enabled: bool 
         for batch_data in tqdm(dataloader, desc="Processing batches"):
             set_name, batch, global_batch_size = batch_data
             
-            # Process this batch
+            # Process this batch (traces are saved immediately within this function)
             problem_traces = process_batch(
                 model, wrapped_model, batch, dataset_config, problem_offset
             )
-            
-            # Save traces for this batch
-            save_batch_traces(recorder, problem_traces, dataset_config)
             
             # Update tracking
             all_problem_traces.extend(problem_traces)
