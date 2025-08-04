@@ -285,6 +285,19 @@ class HRMStateRecorder:
             stacked_data['l_cycles'] = torch.tensor(trace_data['l_cycles'])
             stacked_data['is_h_update'] = torch.tensor(trace_data['is_h_update'])
             
+            # FIXED: Add execution metadata that test script expects
+            stacked_data['metadata'] = {
+                'steps_taken': len(trace.snapshots),
+                'cycles': trace.h_cycles + trace.l_cycles,
+                'execution_time': 0.0,  # Could be measured if needed
+                'batch_size': trace.batch_size,
+                'seq_len': trace.seq_len,
+                'h_cycles': trace.h_cycles,
+                'l_cycles': trace.l_cycles,
+                'halt_max_steps': trace.halt_max_steps,
+                'final_halted': bool(trace.final_halt_decisions.item()) if trace.final_halt_decisions is not None else False
+            }
+            
             # Save in requested format(s)
             if save_format in ["pt", "both"]:
                 pt_file = f"{base_path}_trace_{trace_id}.pt"
@@ -709,6 +722,16 @@ class HRMRecordingWrapper(nn.Module):
             is_h_update=False
         )
         
+        # FIXED: Request Q-head logits in return_keys so they're not filtered out
+        if return_keys is None:
+            return_keys = []
+        
+        # Ensure we get the Q-head logits for recording
+        required_keys = ['q_halt_logits', 'q_continue_logits', 'logits']
+        for key in required_keys:
+            if key not in return_keys:
+                return_keys.append(key)
+        
         # Forward pass
         new_carry, loss, metrics, preds, all_finish = self.model(carry=carry, batch=batch, return_keys=return_keys)
         
@@ -724,6 +747,14 @@ class HRMRecordingWrapper(nn.Module):
         if metrics:
             outputs.update(metrics)
         
+        # FIXED: Q-head logits should now be in preds (the detached_outputs from ACTLossHead)
+        if isinstance(preds, dict):
+            q_halt = preds.get('q_halt_logits')
+            q_continue = preds.get('q_continue_logits')
+        else:
+            q_halt = None
+            q_continue = None
+        
         # Record final state and Q-head outputs
         if hasattr(new_carry, 'inner_carry'):
             final_z_H = new_carry.inner_carry.z_H
@@ -732,8 +763,6 @@ class HRMRecordingWrapper(nn.Module):
             final_z_H = getattr(new_carry, 'z_H', None)
             final_z_L = getattr(new_carry, 'z_L', None)
             
-        q_halt = outputs.get('q_halt_logits')
-        q_continue = outputs.get('q_continue_logits')
         halted = getattr(new_carry, 'halted', None)
         
         self._step_counter += 1
@@ -753,7 +782,7 @@ class HRMRecordingWrapper(nn.Module):
         
         # Store final outputs in trace
         if self.recorder.current_trace:
-            self.recorder.current_trace.final_logits = outputs.get('logits')
+            self.recorder.current_trace.final_logits = preds.get('logits') if isinstance(preds, dict) else None
             self.recorder.current_trace.final_halt_decisions = halted
         
         return new_carry, outputs
