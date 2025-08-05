@@ -37,6 +37,9 @@ class HRMStateSnapshot:
     q_halt_logits: Optional[torch.Tensor] = None
     q_continue_logits: Optional[torch.Tensor] = None
     
+    # Vocabulary logits (output predictions)
+    vocab_logits: Optional[torch.Tensor] = None  # Language model head output
+    
     # Metadata
     is_h_update: bool = False  # Whether H-module was updated this step
     halted: Optional[torch.Tensor] = None  # Halting status per batch element
@@ -130,6 +133,7 @@ class HRMStateRecorder:
                        z_L: torch.Tensor,
                        q_halt_logits: Optional[torch.Tensor] = None,
                        q_continue_logits: Optional[torch.Tensor] = None,
+                       vocab_logits: Optional[torch.Tensor] = None,
                        is_h_update: bool = False,
                        halted: Optional[torch.Tensor] = None):
         """Record a state snapshot."""
@@ -144,6 +148,7 @@ class HRMStateRecorder:
             z_L=z_L.detach().cpu() if z_L is not None else None,
             q_halt_logits=q_halt_logits.detach().cpu() if q_halt_logits is not None else None,
             q_continue_logits=q_continue_logits.detach().cpu() if q_continue_logits is not None else None,
+            vocab_logits=vocab_logits.detach().cpu() if vocab_logits is not None else None,
             is_h_update=is_h_update,
             halted=halted.detach().cpu() if halted is not None else None
         )
@@ -240,6 +245,7 @@ class HRMStateRecorder:
                 'l_states': [], 
                 'q_halt_logits': [],
                 'q_continue_logits': [],
+                'vocab_logits': [],  # NEW: Vocabulary logits at each timestep
                 'steps': [],
                 'h_cycles': [],
                 'l_cycles': [],
@@ -257,6 +263,8 @@ class HRMStateRecorder:
                     trace_data['q_halt_logits'].append(snapshot.q_halt_logits)
                 if snapshot.q_continue_logits is not None:
                     trace_data['q_continue_logits'].append(snapshot.q_continue_logits)
+                if snapshot.vocab_logits is not None:
+                    trace_data['vocab_logits'].append(snapshot.vocab_logits)
                 if snapshot.halted is not None:
                     trace_data['halted'].append(snapshot.halted)
                     
@@ -276,6 +284,8 @@ class HRMStateRecorder:
                 stacked_data['q_halt_logits'] = torch.stack(trace_data['q_halt_logits'])
             if trace_data['q_continue_logits']:
                 stacked_data['q_continue_logits'] = torch.stack(trace_data['q_continue_logits'])
+            if trace_data['vocab_logits']:
+                stacked_data['vocab_logits'] = torch.stack(trace_data['vocab_logits'])
             if trace_data['halted']:
                 stacked_data['halted'] = torch.stack(trace_data['halted'])
                 
@@ -719,6 +729,7 @@ class HRMRecordingWrapper(nn.Module):
             l_cycle=0,
             z_H=initial_z_H,
             z_L=initial_z_L,
+            vocab_logits=None,  # NEW: No vocabulary logits at initial state
             is_h_update=False
         )
         
@@ -751,9 +762,11 @@ class HRMRecordingWrapper(nn.Module):
         if isinstance(preds, dict):
             q_halt = preds.get('q_halt_logits')
             q_continue = preds.get('q_continue_logits')
+            vocab_logits = preds.get('logits')  # NEW: Extract vocabulary logits
         else:
             q_halt = None
             q_continue = None
+            vocab_logits = None
         
         # Record final state and Q-head outputs
         if hasattr(new_carry, 'inner_carry'):
@@ -776,6 +789,7 @@ class HRMRecordingWrapper(nn.Module):
             z_L=final_z_L,
             q_halt_logits=q_halt,
             q_continue_logits=q_continue,
+            vocab_logits=vocab_logits,  # NEW: Pass vocabulary logits to recorder
             is_h_update=True,
             halted=halted
         )

@@ -9,8 +9,8 @@ def get_artifact(artifact_name: str, output_dir: str):
     experiment = Experiment()
     artifact = experiment.get_artifact(artifact_name)
     artifact.download(output_dir)
-    return artifact.path
+    return artifact
 
 
 if __name__ == "__main__":
-    get_artifact("sudoku-complete-traces", "data/trace_dataset")
+    get_artifact("sudoku-training-traces", "data/sudoku_full_trace_dataset")
