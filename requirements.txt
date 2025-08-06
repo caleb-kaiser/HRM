@@ -9,3 +9,8 @@ omegaconf
 hydra-core
 huggingface_hub
 comet_ml
+scikit-learn
+hdbscan
+umap-learn
+matplotlib
+numpy

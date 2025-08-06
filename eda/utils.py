@@ -1,13 +1,18 @@
 import torch
 import os
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 import hdbscan
 import matplotlib.pyplot as plt
 from umap import UMAP
+import ruptures as rpt
+import numpy as np
+from sklearn.cluster import KMeans
+from collections import defaultdict
+import matplotlib.animation as animation
 
 def load_tensor_from_file(file_path: str) -> torch.Tensor:
     """
@@ -131,9 +136,20 @@ def create_problem_tensors(problem: Dict[str, Any], dataset_dir: str) -> Dict[st
         'sudoku_target': problem.get('sudoku_target'),
         'problem_metadata': problem.get('metadata', {})
     }
+
     
     return result
 
+def load_problems_to_tensors(dataset_dir: str, num_problems=100) -> List[Dict[str, torch.Tensor]]:
+    """
+    Load all problems from the dataset directory and convert them to tensors.
+    """
+    metadata = load_dataset_metadata(dataset_dir)
+    problems = metadata['problems']
+
+    problem_tensors = [create_problem_tensors(problem, f"../data") for problem in problems[:num_problems]]
+    return problem_tensors
+    
 def segment_l_phases(problem):
     l_states = problem['l_states'].squeeze(1)  # [T, 82, 512]
     pooled = l_states.mean(dim=1).to(torch.float32).cpu().numpy()  # [T, 512]
@@ -146,8 +162,72 @@ def segment_l_phases(problem):
     
     return labels, X_reduced
 
+def breakpoints_to_labels(breakpoints, T):
+    """
+    Convert list of breakpoints into flat segment labels.
+
+    Args:
+        breakpoints (List[int]): Output from ruptures.predict()
+        T (int): Total number of steps
+
+    Returns:
+        np.ndarray: shape [T] segment index for each step
+    """
+    labels = np.zeros(T, dtype=int)
+    prev = 0
+    for i, bp in enumerate(breakpoints):
+        labels[prev:bp] = i
+        prev = bp
+    return labels
 
 
+
+def segment_with_ruptures(X, model="rbf", penalty=10):
+    """
+    Segments the latent trajectory using Ruptures.
+    
+    Args:
+        X (np.ndarray): shape [T, D] - pooled L-states
+        model (str): cost model to use ("l2", "rbf", etc.)
+        penalty (float): penalty for creating a new segment
+
+    Returns:
+        List[int]: Change point indices (e.g., [10, 20, 31] means 3 segments)
+    """
+    algo = rpt.Pelt(model=model).fit(X)
+    breakpoints = algo.predict(pen=penalty)
+    return breakpoints
+
+
+
+def segment_l_phases_rupture(problem, plot=True):
+    l_states = problem['l_states'].squeeze(1)  # [T, 82, 512]
+    pooled = l_states.mean(dim=1).to(torch.float32).cpu().numpy()  # [T, 512]
+    breakpoints = segment_with_ruptures(pooled, model="l2", penalty=8)
+    rupture_labels = breakpoints_to_labels(breakpoints, pooled.shape[0])
+
+    # Plot like HDBSCAN results
+    if plot:
+        plot_cluster_timeline(rupture_labels, is_h_update=problem['is_h_update'], title="Ruptures Segmentation Timeline")
+
+    return breakpoints, rupture_labels
+
+
+
+def extract_predicted_grids(vocab_logits):
+    """
+    Convert vocab_logits to a list of 9x9 predicted Sudoku grids per H-step.
+
+    Args:
+        vocab_logits (torch.Tensor): [H, 1, 81, 11] tensor of logits
+
+    Returns:
+        List[np.ndarray]: List of [9, 9] integer grids
+    """
+    logits = vocab_logits.squeeze(1)          # -> [H, 81, 11]
+    preds = torch.argmax(logits, dim=-1)      # -> [H, 81]
+    grids = preds.view(-1, 9, 9) - 1          # -> [H, 9, 9]
+    return [grid.cpu().numpy() for grid in grids]
 
 def plot_umap_with_labels(X_reduced, labels, is_h_update=None, title="UMAP of L-States with Phase Labels"):
     umap_model = UMAP(n_neighbors=5, min_dist=0.3)
@@ -233,16 +313,222 @@ def plot_cluster_timeline_with_grid_deltas_and_q(
 
 
 
+def visualize_sudoku_grids_over_time(grids, title_prefix="HRM Predicted Grid", cmap="viridis", figsize=(12, 12)):
+    """
+    Visualizes a sequence of Sudoku grids (e.g., one per H-step) as heatmaps.
+
+    Args:
+        grids (List[np.ndarray]): List of 9x9 Sudoku grids (each as np.array)
+        title_prefix (str): Prefix for subplot titles
+        cmap (str): Matplotlib colormap
+        figsize (tuple): Size of the full figure
+    """
+    n = len(grids)
+    cols = min(n, 4)
+    rows = (n + cols - 1) // cols
+
+    fig, axes = plt.subplots(rows, cols, figsize=figsize)
+    axes = np.array(axes).reshape(-1)
+
+    for i, grid in enumerate(grids):
+        ax = axes[i]
+        im = ax.imshow(grid, cmap=cmap, vmin=0, vmax=9)
+        ax.set_title(f"{title_prefix} @ H-step {i}")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        # Optional: overlay digit values
+        for y in range(9):
+            for x in range(9):
+                val = grid[y, x]
+                if val != 0:
+                    ax.text(x, y, str(val), ha='center', va='center', color='white', fontsize=10, weight='bold')
+
+    # Hide any unused subplots
+    for j in range(i + 1, len(axes)):
+        axes[j].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
+
+def visualize_grid_deltas(grids, title_prefix="Grid Changes", cmap="coolwarm", figsize=(12, 12)):
+    """
+    Visualizes cell-by-cell changes between consecutive Sudoku grids as heatmaps.
+
+    Args:
+        grids (List[np.ndarray]): List of 9x9 Sudoku grids
+        title_prefix (str): Prefix for each subplot title
+        cmap (str): Colormap for visualizing changes
+        figsize (tuple): Figure size
+    """
+    n = len(grids)
+    delta_grids = []
+
+    for i in range(1, n):
+        prev = grids[i - 1]
+        curr = grids[i]
+        delta = (curr != prev).astype(int)  # 1 where changed, 0 where not
+        delta_grids.append(delta)
+
+    # Plot deltas
+    cols = min(len(delta_grids), 4)
+    rows = (len(delta_grids) + cols - 1) // cols
+
+    fig, axes = plt.subplots(rows, cols, figsize=figsize)
+    axes = np.array(axes).reshape(-1)
+
+    for i, delta in enumerate(delta_grids):
+        ax = axes[i]
+        im = ax.imshow(delta, cmap=cmap, vmin=0, vmax=1)
+        ax.set_title(f"{title_prefix} H{i}→H{i+1}")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        # Overlay changed cell markers
+        for y in range(9):
+            for x in range(9):
+                if delta[y, x] == 1:
+                    ax.text(x, y, "•", ha='center', va='center', color='black', fontsize=12, fontweight='bold')
+
+    # Hide unused plots
+    for j in range(i + 1, len(axes)):
+        axes[j].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
+
+def get_segment_ranges(breakpoints, T):
+    start = 0
+    ranges = []
+    for b in breakpoints:
+        ranges.append((start, b))
+        start = b
+    if start < T:
+        ranges.append((start, T))  # final segment if ruptures didn't end at T
+    return ranges
+
+def cluster_segments(problem_tensors, n_clusters=10):
+    all_embeddings = []
+    segment_counts = []
+
+    for problem in problem_tensors:
+        # Segment and get ranges
+        problem['segments'], problem['segment_labels'] = segment_l_phases_rupture(problem, plot=False)
+        problem['segment_ranges'] = get_segment_ranges(problem['segments'], T=problem['steps'].shape[0])
+
+        pooled_embeddings = []
+
+        # Mean-pool each segment across time and cells: [T_seg, 82, 512] → [512]
+        for start, end in problem['segment_ranges']:
+            segment_tensor = problem['l_states'][start:end]  # [T_seg, 1, 82, 512]
+            segment_tensor = segment_tensor.squeeze(1)       # [T_seg, 82, 512]
+            segment_embedding = segment_tensor.mean(dim=(0, 1))  # → [512]
+            pooled_embeddings.append(segment_embedding)
+
+        # Store per-problem
+        problem['segment_embeddings_pooled'] = torch.stack(pooled_embeddings)  # [num_segments, 512]
+        all_embeddings.append(problem['segment_embeddings_pooled'])
+        segment_counts.append(len(pooled_embeddings))
+
+    # Concatenate all segment embeddings across all problems
+    combined_embeddings = torch.cat(all_embeddings, dim=0).to(torch.float32)  # [total_segments, 512]
+
+    # Run KMeans
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    combined_labels = kmeans.fit_predict(combined_embeddings.cpu().numpy())
+
+    # Assign cluster IDs back to each problem
+    offset = 0
+    for problem, n_segments in zip(problem_tensors, segment_counts):
+        problem['segment_cluster_ids'] = combined_labels[offset:offset + n_segments]
+        offset += n_segments
+
+    return problem_tensors
+
+def extract_h_step_deltas(clustered_tensors):
+    cluster_to_deltas = defaultdict(list)
+
+    for problem in clustered_tensors:
+        h_steps = problem["vocab_logits"]  # shape: [H, 1, 81, 11]
+        for cluster_id, seg_id in zip(problem["segment_cluster_ids"], problem["segment_labels"]):
+            h_logits = h_steps[seg_id]  # You may need to slice
+            decoded = extract_predicted_grids(h_logits)[0][0] # List of 9x9 grids
+
+            for i in range(len(decoded) - 1):
+                delta = (decoded[i+1] != decoded[i])  # Boolean mask
+                cluster_to_deltas[cluster_id].append(delta)
+
+    return cluster_to_deltas
+
+# LOOK HERE TODO There is a shape issue happening above. See the notebook.
+# Re-import necessary modules after kernel reset
+
+def plot_delta_heatmap(delta_masks, title="Delta Heatmap (Mean)"):
+    """
+    delta_masks: list of [9, 9] numpy arrays or torch tensors with 0/1 values
+    """
+    mean_delta = torch.stack(delta_masks).float().mean(dim=0).numpy()
+
+    plt.figure(figsize=(6, 6))
+    plt.title(title)
+    plt.imshow(mean_delta, cmap='hot', interpolation='nearest')
+    plt.colorbar(label="Mean Change Frequency")
+    plt.xticks(np.arange(9))
+    plt.yticks(np.arange(9))
+    plt.grid(False)
+    plt.show()
+
+def plot_cell_coverage(delta_masks, title="Cell Coverage Plot"):
+    """
+    delta_masks: list of [9, 9] numpy arrays or torch tensors with 0/1 values
+    """
+    coverage = torch.stack(delta_masks).sum(dim=0).numpy()
+
+    plt.figure(figsize=(6, 6))
+    plt.title(title)
+    plt.imshow(coverage, cmap='Blues', interpolation='nearest')
+    plt.colorbar(label="Number of Times Changed")
+    plt.xticks(np.arange(9))
+    plt.yticks(np.arange(9))
+    plt.grid(False)
+    plt.show()
+
+def animate_grid_sequence(grid_sequence, title="Grid Evolution Over H-Steps"):
+    """
+    grid_sequence: list of [9, 9] numpy arrays or tensors, assumed integer values from 0–9
+    """
+    fig, ax = plt.subplots(figsize=(6, 6))
+    im = ax.imshow(grid_sequence[0], cmap='viridis', vmin=0, vmax=9)
+
+    def update(frame):
+        im.set_data(grid_sequence[frame])
+        ax.set_title(f"{title} (Step {frame})")
+        return [im]
+
+    ani = animation.FuncAnimation(fig, update, frames=len(grid_sequence), blit=True, repeat=False)
+    plt.close(fig)
+    return ani
+
+
 if __name__ == "__main__":
     metadata = load_dataset_metadata("data/sudoku_trace_dataset")
     problem = metadata['problems'][0]
     print(problem)
 
     problem = create_problem_tensors(problem, "data/")
-    labels, X_reduced = segment_l_phases(problem)
-    plot_umap_with_labels(X_reduced, labels, problem['is_h_update'])
-    plot_cluster_timeline(labels, problem['is_h_update'])
-    plot_cluster_timeline_with_grid_deltas_and_q(labels, problem['problem_info']['sudoku_input'], problem['q_halt_logits'], problem['is_h_update'])
+    for key in problem.keys():
+        print(key)
+        #print(problem[key].shape)
+       # print(problem[key])
+        #print("-"*100
+
+    print(problem['vocab_logits'].shape)
+    #labels, X_reduced = segment_l_phases(problem)
+    #plot_umap_with_labels(X_reduced, labels, problem['is_h_update'])
+    #plot_cluster_timeline(labels, problem['is_h_update'])
+    #plot_cluster_timeline_with_grid_deltas_and_q(labels, problem['problem_info']['sudoku_input'], problem['q_halt_logits'], problem['is_h_update'])
 
 
 
