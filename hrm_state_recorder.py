@@ -35,19 +35,36 @@ class HRMInstrumentedModel(nn.Module):
         
     def _compute_l_vocab_logits(self, z_L: torch.Tensor) -> torch.Tensor:
         """Compute vocabulary logits from L-module states."""
-        # Access the language model head from the inner model
         try:
+            print(f"🔍 DEBUG: Computing L-vocab logits from z_L shape: {z_L.shape}")
+            
+            # Access the language model head from the inner model
             if hasattr(self.model, 'inner') and hasattr(self.model.inner, 'lm_head'):
+                print(f"🔍 DEBUG: Found lm_head at self.model.inner.lm_head")
                 lm_head = self.model.inner.lm_head
                 puzzle_emb_len = getattr(self.model.inner, 'puzzle_emb_len', 0)
-                return lm_head(z_L)[:, puzzle_emb_len:]
+                result = lm_head(z_L)[:, puzzle_emb_len:]
+                print(f"🔍 DEBUG: Computed L-vocab logits shape: {result.shape}")
+                return result
             elif hasattr(self.model, 'lm_head'):
+                print(f"🔍 DEBUG: Found lm_head at self.model.lm_head")
+                lm_head = self.model.lm_head
                 puzzle_emb_len = getattr(self.model, 'puzzle_emb_len', 0)
-                return self.model.lm_head(z_L)[:, puzzle_emb_len:]
+                result = lm_head(z_L)[:, puzzle_emb_len:]
+                print(f"🔍 DEBUG: Computed L-vocab logits shape: {result.shape}")
+                return result
+            elif hasattr(self.model, 'model') and hasattr(self.model.model, 'inner') and hasattr(self.model.model.inner, 'lm_head'):
+                print(f"🔍 DEBUG: Found lm_head at self.model.model.inner.lm_head")
+                lm_head = self.model.model.inner.lm_head
+                puzzle_emb_len = getattr(self.model.model.inner, 'puzzle_emb_len', 0)
+                result = lm_head(z_L)[:, puzzle_emb_len:]
+                print(f"🔍 DEBUG: Computed L-vocab logits shape: {result.shape}")
+                return result
             else:
+                print(f"🔍 DEBUG: Could not find lm_head anywhere")
                 return None
         except Exception as e:
-            print(f"Warning: Could not compute L-step vocab logits: {e}")
+            print(f"🔍 DEBUG: Exception in _compute_l_vocab_logits: {e}")
             return None
     
     def clear_l_cache(self):
@@ -237,8 +254,8 @@ class HRMStateRecorder:
                        step: int,
                        h_cycle: int, 
                        l_cycle: int,
-                       z_H: torch.Tensor,
-                       z_L: torch.Tensor,
+                       z_H: Optional[torch.Tensor],
+                       z_L: Optional[torch.Tensor],
                        q_halt_logits: Optional[torch.Tensor] = None,
                        q_continue_logits: Optional[torch.Tensor] = None,
                        vocab_logits: Optional[torch.Tensor] = None,
@@ -248,6 +265,8 @@ class HRMStateRecorder:
         """Record a state snapshot."""
         if self.current_trace is None:
             return
+            
+        print(f"🔍 DEBUG: Recording snapshot - z_H shape: {z_H.shape if z_H is not None else 'None'}, z_L shape: {z_L.shape if z_L is not None else 'None'}")
             
         snapshot = HRMStateSnapshot(
             step=step,
