@@ -36,15 +36,18 @@ class HRMInstrumentedModel(nn.Module):
     def _compute_l_vocab_logits(self, z_L: torch.Tensor) -> torch.Tensor:
         """Compute vocabulary logits from L-module states."""
         # Access the language model head from the inner model
-        if hasattr(self.model, 'inner') and hasattr(self.model.inner, 'lm_head'):
-            lm_head = self.model.inner.lm_head
-            puzzle_emb_len = getattr(self.model.inner, 'puzzle_emb_len', 0)
-            return lm_head(z_L)[:, puzzle_emb_len:]
-        elif hasattr(self.model, 'lm_head'):
-            puzzle_emb_len = getattr(self.model, 'puzzle_emb_len', 0)
-            return self.model.lm_head(z_L)[:, puzzle_emb_len:]
-        else:
-            # Fallback: return None if we can't find the language model head
+        try:
+            if hasattr(self.model, 'inner') and hasattr(self.model.inner, 'lm_head'):
+                lm_head = self.model.inner.lm_head
+                puzzle_emb_len = getattr(self.model.inner, 'puzzle_emb_len', 0)
+                return lm_head(z_L)[:, puzzle_emb_len:]
+            elif hasattr(self.model, 'lm_head'):
+                puzzle_emb_len = getattr(self.model, 'puzzle_emb_len', 0)
+                return self.model.lm_head(z_L)[:, puzzle_emb_len:]
+            else:
+                return None
+        except Exception as e:
+            print(f"Warning: Could not compute L-step vocab logits: {e}")
             return None
     
     def clear_l_cache(self):
@@ -67,21 +70,41 @@ class HRMInstrumentedModel(nn.Module):
                 if l_vocab_logits is not None:
                     instrumented_model.l_vocab_logits_cache.append(l_vocab_logits.detach().cpu())
         
-        # Register hook on L-level module
-        hook_handle = None
+        # Register hook on L-level module - try multiple possible locations
+        hook_handles = []
+        
+        # Try hooking into inner.L_level
         if hasattr(self.model, 'inner') and hasattr(self.model.inner, 'L_level'):
-            hook_handle = self.model.inner.L_level.register_forward_hook(l_module_hook)
-        elif hasattr(self.model, 'L_level'):
-            hook_handle = self.model.L_level.register_forward_hook(l_module_hook)
+            try:
+                hook_handles.append(self.model.inner.L_level.register_forward_hook(l_module_hook))
+            except:
+                pass
+        
+        # Try hooking into L_level directly
+        if hasattr(self.model, 'L_level'):
+            try:
+                hook_handles.append(self.model.L_level.register_forward_hook(l_module_hook))
+            except:
+                pass
+        
+        # Try hooking into model.model.inner.L_level (in case of nested wrapping)
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'inner') and hasattr(self.model.model.inner, 'L_level'):
+            try:
+                hook_handles.append(self.model.model.inner.L_level.register_forward_hook(l_module_hook))
+            except:
+                pass
         
         try:
             # Run the original forward pass
             result = self.model(*args, **kwargs)
             return result
         finally:
-            # Clean up hook
-            if hook_handle is not None:
-                hook_handle.remove()
+            # Clean up hooks
+            for hook_handle in hook_handles:
+                try:
+                    hook_handle.remove()
+                except:
+                    pass
     
     def __getattr__(self, name):
         """Delegate attribute access to the wrapped model."""
