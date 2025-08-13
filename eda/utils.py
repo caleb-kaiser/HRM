@@ -454,7 +454,7 @@ def extract_h_step_deltas(clustered_tensors):
         h_steps = problem["vocab_logits"]  # shape: [H, 1, 81, 11]
         for cluster_id, seg_id in zip(problem["segment_cluster_ids"], problem["segment_labels"]):
             h_logits = h_steps[seg_id]  # You may need to slice
-            decoded = extract_predicted_grids(h_logits)[0][0] # List of 9x9 grids
+            decoded = extract_predicted_grids(h_logits)[0] # List of 9x9 grids
 
             for i in range(len(decoded) - 1):
                 delta = (decoded[i+1] != decoded[i])  # Boolean mask
@@ -462,54 +462,115 @@ def extract_h_step_deltas(clustered_tensors):
 
     return cluster_to_deltas
 
-# LOOK HERE TODO There is a shape issue happening above. See the notebook.
-# Re-import necessary modules after kernel reset
 
-def plot_delta_heatmap(delta_masks, title="Delta Heatmap (Mean)"):
-    """
-    delta_masks: list of [9, 9] numpy arrays or torch tensors with 0/1 values
-    """
-    mean_delta = torch.stack(delta_masks).float().mean(dim=0).numpy()
+def get_grid_from_logits(vocab_logits_t):
+    """Convert [81, 11] logits → [9, 9] grid of predicted tokens."""
+    preds = vocab_logits_t.argmax(dim=-1)  # [81]
+    return preds.view(9, 9).cpu()
 
-    plt.figure(figsize=(6, 6))
-    plt.title(title)
-    plt.imshow(mean_delta, cmap='hot', interpolation='nearest')
-    plt.colorbar(label="Mean Change Frequency")
-    plt.xticks(np.arange(9))
-    plt.yticks(np.arange(9))
-    plt.grid(False)
+
+def compute_delta_mask(grid1, grid2):
+    """Returns binary mask of changed cells between two 9x9 grids."""
+    return (grid1 != grid2).int()
+
+
+def plot_mean_delta_heatmaps_by_cluster(problem_tensors, num_clusters):
+    cluster_deltas = defaultdict(list)
+
+    for problem in problem_tensors:
+        vocab_logits = problem['vocab_logits']  # [T, 1, 81, 11]
+        segment_ranges = problem['segment_ranges']
+        cluster_ids = problem['segment_cluster_ids']
+
+        for (start, end), cluster_id in zip(segment_ranges, cluster_ids):
+            if end >= vocab_logits.shape[0]:
+                continue  # skip segments that go out of bounds
+
+            g_start = get_grid_from_logits(vocab_logits[start][0])  # [9, 9]
+            g_end   = get_grid_from_logits(vocab_logits[end - 1][0])
+            delta_mask = compute_delta_mask(g_start, g_end).numpy()  # [9, 9]
+
+            cluster_deltas[cluster_id].append(delta_mask)
+
+    # Plot heatmaps
+    num_cols = 5
+    num_rows = (num_clusters + num_cols - 1) // num_cols
+    fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols * 3, num_rows * 3))
+
+    for cluster_id in range(num_clusters):
+        row, col = divmod(cluster_id, num_cols)
+        ax = axs[row, col] if num_rows > 1 else axs[col]
+        if cluster_id not in cluster_deltas:
+            ax.axis('off')
+            continue
+        masks = np.stack(cluster_deltas[cluster_id])  # [num_segments, 9, 9]
+        mean_mask = masks.mean(axis=0)  # [9, 9]
+
+        im = ax.imshow(mean_mask, cmap='viridis', vmin=0, vmax=1)
+        ax.set_title(f"Cluster {cluster_id}")
+        ax.axis('off')
+
+    plt.tight_layout()
+    plt.suptitle("Mean Delta Heatmaps by Cluster", fontsize=16, y=1.02)
+    plt.colorbar(im, ax=axs.ravel().tolist(), shrink=0.6)
     plt.show()
 
-def plot_cell_coverage(delta_masks, title="Cell Coverage Plot"):
-    """
-    delta_masks: list of [9, 9] numpy arrays or torch tensors with 0/1 values
-    """
-    coverage = torch.stack(delta_masks).sum(dim=0).numpy()
 
-    plt.figure(figsize=(6, 6))
-    plt.title(title)
-    plt.imshow(coverage, cmap='Blues', interpolation='nearest')
-    plt.colorbar(label="Number of Times Changed")
-    plt.xticks(np.arange(9))
-    plt.yticks(np.arange(9))
-    plt.grid(False)
+import matplotlib.pyplot as plt
+import numpy as np
+
+def describe_grid_changes(input_grid, output_grid):
+    changes = []
+    for i in range(9):
+        for j in range(9):
+            before = input_grid[i, j].item()
+            after = output_grid[i, j].item()
+            if before != after:
+                changes.append(f"Wrote {after} at (row={i}, col={j}), replacing {before}")
+    return changes
+
+def visualize_grid_with_numbers(grid, title=""):
+    fig, ax = plt.subplots()
+    ax.imshow(np.zeros_like(grid), cmap="Greys", vmin=0, vmax=9)  # blank background
+    for i in range(9):
+        for j in range(9):
+            val = grid[i, j].item()
+            if val != 0:
+                ax.text(j, i, str(val), va='center', ha='center', fontsize=12)
+    ax.set_title(title)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    return fig
+
+def show_segment_change_with_description(input_grid, output_grid, delta=None, verbose=True):
+    if delta is None:
+        delta = (input_grid != output_grid).int()
+
+    changes = describe_grid_changes(input_grid, output_grid)
+    
+    if verbose:
+        print("Detected Changes:")
+        for change in changes:
+            print("•", change)
+
+    # Plot input/output/delta
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+    for ax, grid, name in zip(axes, [input_grid, output_grid, delta], 
+                              ["Input", "Output", "Delta (Highlight)"]):
+        ax.imshow(np.zeros((9, 9)), cmap="Greys", vmin=0, vmax=9)
+        for i in range(9):
+            for j in range(9):
+                val = grid[i, j].item()
+                if val != 0:
+                    ax.text(j, i, str(val), ha='center', va='center', fontsize=12, 
+                            color="red" if name == "Delta (Highlight)" else "black")
+        ax.set_title(name)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    plt.tight_layout()
     plt.show()
-
-def animate_grid_sequence(grid_sequence, title="Grid Evolution Over H-Steps"):
-    """
-    grid_sequence: list of [9, 9] numpy arrays or tensors, assumed integer values from 0–9
-    """
-    fig, ax = plt.subplots(figsize=(6, 6))
-    im = ax.imshow(grid_sequence[0], cmap='viridis', vmin=0, vmax=9)
-
-    def update(frame):
-        im.set_data(grid_sequence[frame])
-        ax.set_title(f"{title} (Step {frame})")
-        return [im]
-
-    ani = animation.FuncAnimation(fig, update, frames=len(grid_sequence), blit=True, repeat=False)
-    plt.close(fig)
-    return ani
 
 
 if __name__ == "__main__":
