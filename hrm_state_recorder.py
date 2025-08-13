@@ -818,9 +818,11 @@ class HRMRecordingWrapper(nn.Module):
         if hasattr(carry, 'inner_carry'):
             initial_z_H = carry.inner_carry.z_H
             initial_z_L = carry.inner_carry.z_L
+            print(f"🔍 DEBUG: Found inner_carry, z_H shape: {initial_z_H.shape}, z_L shape: {initial_z_L.shape}")
         else:
             initial_z_H = getattr(carry, 'z_H', None)
             initial_z_L = getattr(carry, 'z_L', None)
+            print(f"🔍 DEBUG: No inner_carry, z_H: {initial_z_H}, z_L: {initial_z_L}")
             
         # Record the initial state
         self.recorder.record_snapshot(
@@ -844,8 +846,20 @@ class HRMRecordingWrapper(nn.Module):
             if key not in return_keys:
                 return_keys.append(key)
         
+        # Debug: Check if instrumented model has hooks set up
+        print(f"🔍 DEBUG: Instrumented model type: {type(self.model)}")
+        print(f"🔍 DEBUG: Model has l_vocab_logits_cache: {hasattr(self.model, 'l_vocab_logits_cache')}")
+        if hasattr(self.model, 'l_vocab_logits_cache'):
+            print(f"🔍 DEBUG: Cache size before forward: {len(self.model.l_vocab_logits_cache)}")
+        
         # Forward pass
         new_carry, loss, metrics, preds, all_finish = self.model(carry=carry, batch=batch, return_keys=return_keys)
+        
+        # Debug: Check cache after forward pass
+        if hasattr(self.model, 'l_vocab_logits_cache'):
+            print(f"🔍 DEBUG: Cache size after forward: {len(self.model.l_vocab_logits_cache)}")
+            if self.model.l_vocab_logits_cache:
+                print(f"🔍 DEBUG: First cache entry shape: {self.model.l_vocab_logits_cache[0].shape}")
         
         # Combine outputs for compatibility
         outputs = {
@@ -874,14 +888,19 @@ class HRMRecordingWrapper(nn.Module):
         if hasattr(self.model, 'l_vocab_logits_cache') and self.model.l_vocab_logits_cache:
             # Use the most recent L-step vocab logits (last one computed)
             l_vocab_logits = self.model.l_vocab_logits_cache[-1] if self.model.l_vocab_logits_cache else None
+            print(f"🔍 DEBUG: Extracted L-vocab logits shape: {l_vocab_logits.shape if l_vocab_logits is not None else 'None'}")
+        else:
+            print(f"🔍 DEBUG: No L-vocab logits found in cache")
         
         # Record final state and Q-head outputs
         if hasattr(new_carry, 'inner_carry'):
             final_z_H = new_carry.inner_carry.z_H
             final_z_L = new_carry.inner_carry.z_L
+            print(f"🔍 DEBUG: Found final inner_carry, z_H shape: {final_z_H.shape}, z_L shape: {final_z_L.shape}")
         else:
             final_z_H = getattr(new_carry, 'z_H', None)
             final_z_L = getattr(new_carry, 'z_L', None)
+            print(f"🔍 DEBUG: No final inner_carry, z_H: {final_z_H}, z_L: {final_z_L}")
             
         halted = getattr(new_carry, 'halted', None)
         

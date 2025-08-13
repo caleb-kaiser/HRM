@@ -86,6 +86,21 @@ def test_l_vocab_logits_capture():
     with torch.device("cuda"):
         carry = model.initial_carry(batch_gpu)
     
+    # Debug: Print carry structure
+    print(f"\n🔍 Debugging carry structure:")
+    print(f"   carry type: {type(carry)}")
+    print(f"   carry attributes: {dir(carry)}")
+    if hasattr(carry, 'inner_carry'):
+        print(f"   inner_carry type: {type(carry.inner_carry)}")
+        print(f"   inner_carry attributes: {dir(carry.inner_carry)}")
+        if hasattr(carry.inner_carry, 'z_H'):
+            print(f"   z_H shape: {carry.inner_carry.z_H.shape}")
+            print(f"   z_L shape: {carry.inner_carry.z_L.shape}")
+        else:
+            print(f"   No z_H/z_L in inner_carry")
+    else:
+        print(f"   No inner_carry attribute")
+    
     print(f"\n🔄 Testing recording with L-step vocabulary logits capture...")
     
     # Record execution
