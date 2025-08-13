@@ -65,34 +65,49 @@ class HRMInstrumentedModel(nn.Module):
         # Hook function to capture L-module states and compute vocab logits
         def l_module_hook(module, input, output):
             if output is not None:
+                print(f"🔍 DEBUG: L-module hook triggered! Output shape: {output.shape}")
                 # Compute vocabulary logits from L-module output
                 l_vocab_logits = instrumented_model._compute_l_vocab_logits(output)
                 if l_vocab_logits is not None:
                     instrumented_model.l_vocab_logits_cache.append(l_vocab_logits.detach().cpu())
+                    print(f"🔍 DEBUG: Added L-vocab logits to cache, shape: {l_vocab_logits.shape}")
         
         # Register hook on L-level module - try multiple possible locations
         hook_handles = []
         
+        # Debug: Print model structure
+        print(f"🔍 DEBUG: Model structure exploration:")
+        print(f"   self.model type: {type(self.model)}")
+        print(f"   self.model attributes: {[attr for attr in dir(self.model) if not attr.startswith('_')]}")
+        
         # Try hooking into inner.L_level
         if hasattr(self.model, 'inner') and hasattr(self.model.inner, 'L_level'):
             try:
+                print(f"🔍 DEBUG: Found self.model.inner.L_level: {type(self.model.inner.L_level)}")
                 hook_handles.append(self.model.inner.L_level.register_forward_hook(l_module_hook))
-            except:
-                pass
+                print(f"🔍 DEBUG: Successfully registered hook on self.model.inner.L_level")
+            except Exception as e:
+                print(f"🔍 DEBUG: Failed to hook self.model.inner.L_level: {e}")
         
         # Try hooking into L_level directly
         if hasattr(self.model, 'L_level'):
             try:
+                print(f"🔍 DEBUG: Found self.model.L_level: {type(self.model.L_level)}")
                 hook_handles.append(self.model.L_level.register_forward_hook(l_module_hook))
-            except:
-                pass
+                print(f"🔍 DEBUG: Successfully registered hook on self.model.L_level")
+            except Exception as e:
+                print(f"🔍 DEBUG: Failed to hook self.model.L_level: {e}")
         
         # Try hooking into model.model.inner.L_level (in case of nested wrapping)
         if hasattr(self.model, 'model') and hasattr(self.model.model, 'inner') and hasattr(self.model.model.inner, 'L_level'):
             try:
+                print(f"🔍 DEBUG: Found self.model.model.inner.L_level: {type(self.model.model.inner.L_level)}")
                 hook_handles.append(self.model.model.inner.L_level.register_forward_hook(l_module_hook))
-            except:
-                pass
+                print(f"🔍 DEBUG: Successfully registered hook on self.model.model.inner.L_level")
+            except Exception as e:
+                print(f"🔍 DEBUG: Failed to hook self.model.model.inner.L_level: {e}")
+        
+        print(f"🔍 DEBUG: Total hooks registered: {len(hook_handles)}")
         
         try:
             # Run the original forward pass
@@ -122,8 +137,8 @@ class HRMStateSnapshot:
     l_cycle: int
     
     # Hidden states
-    z_H: torch.Tensor  # High-level module state
-    z_L: torch.Tensor  # Low-level module state
+    z_H: Optional[torch.Tensor]  # High-level module state
+    z_L: Optional[torch.Tensor]  # Low-level module state
     
     # Q-head outputs (if available)
     q_halt_logits: Optional[torch.Tensor] = None
