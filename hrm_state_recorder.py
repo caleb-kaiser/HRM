@@ -22,6 +22,75 @@ import numpy as np
 import datetime
 
 
+class HRMInstrumentedModel(nn.Module):
+    """
+    Wrapper that instruments an HRM model to compute L-step vocabulary logits
+    while preserving the original model behavior.
+    """
+    
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        self.l_vocab_logits_cache = []
+        
+    def _compute_l_vocab_logits(self, z_L: torch.Tensor) -> torch.Tensor:
+        """Compute vocabulary logits from L-module states."""
+        # Access the language model head from the inner model
+        if hasattr(self.model, 'inner') and hasattr(self.model.inner, 'lm_head'):
+            lm_head = self.model.inner.lm_head
+            puzzle_emb_len = getattr(self.model.inner, 'puzzle_emb_len', 0)
+            return lm_head(z_L)[:, puzzle_emb_len:]
+        elif hasattr(self.model, 'lm_head'):
+            puzzle_emb_len = getattr(self.model, 'puzzle_emb_len', 0)
+            return self.model.lm_head(z_L)[:, puzzle_emb_len:]
+        else:
+            # Fallback: return None if we can't find the language model head
+            return None
+    
+    def clear_l_cache(self):
+        """Clear the L-step vocabulary logits cache."""
+        self.l_vocab_logits_cache.clear()
+    
+    def forward(self, *args, **kwargs):
+        """Forward pass that also computes L-step vocabulary logits."""
+        # Clear cache for new forward pass
+        self.clear_l_cache()
+        
+        # Store reference to self for the hook
+        instrumented_model = self
+        
+        # Hook function to capture L-module states and compute vocab logits
+        def l_module_hook(module, input, output):
+            if output is not None:
+                # Compute vocabulary logits from L-module output
+                l_vocab_logits = instrumented_model._compute_l_vocab_logits(output)
+                if l_vocab_logits is not None:
+                    instrumented_model.l_vocab_logits_cache.append(l_vocab_logits.detach().cpu())
+        
+        # Register hook on L-level module
+        hook_handle = None
+        if hasattr(self.model, 'inner') and hasattr(self.model.inner, 'L_level'):
+            hook_handle = self.model.inner.L_level.register_forward_hook(l_module_hook)
+        elif hasattr(self.model, 'L_level'):
+            hook_handle = self.model.L_level.register_forward_hook(l_module_hook)
+        
+        try:
+            # Run the original forward pass
+            result = self.model(*args, **kwargs)
+            return result
+        finally:
+            # Clean up hook
+            if hook_handle is not None:
+                hook_handle.remove()
+    
+    def __getattr__(self, name):
+        """Delegate attribute access to the wrapped model."""
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.model, name)
+
+
 @dataclass
 class HRMStateSnapshot:
     """Single timestep snapshot of HRM states."""
@@ -38,7 +107,8 @@ class HRMStateSnapshot:
     q_continue_logits: Optional[torch.Tensor] = None
     
     # Vocabulary logits (output predictions)
-    vocab_logits: Optional[torch.Tensor] = None  # Language model head output
+    vocab_logits: Optional[torch.Tensor] = None  # Language model head output from H-module
+    L_vocab_logits: Optional[torch.Tensor] = None  # Language model head output from L-module
     
     # Metadata
     is_h_update: bool = False  # Whether H-module was updated this step
@@ -134,6 +204,7 @@ class HRMStateRecorder:
                        q_halt_logits: Optional[torch.Tensor] = None,
                        q_continue_logits: Optional[torch.Tensor] = None,
                        vocab_logits: Optional[torch.Tensor] = None,
+                       L_vocab_logits: Optional[torch.Tensor] = None,
                        is_h_update: bool = False,
                        halted: Optional[torch.Tensor] = None):
         """Record a state snapshot."""
@@ -149,6 +220,7 @@ class HRMStateRecorder:
             q_halt_logits=q_halt_logits.detach().cpu() if q_halt_logits is not None else None,
             q_continue_logits=q_continue_logits.detach().cpu() if q_continue_logits is not None else None,
             vocab_logits=vocab_logits.detach().cpu() if vocab_logits is not None else None,
+            L_vocab_logits=L_vocab_logits.detach().cpu() if L_vocab_logits is not None else None,
             is_h_update=is_h_update,
             halted=halted.detach().cpu() if halted is not None else None
         )
@@ -246,6 +318,7 @@ class HRMStateRecorder:
                 'q_halt_logits': [],
                 'q_continue_logits': [],
                 'vocab_logits': [],  # NEW: Vocabulary logits at each timestep
+                'L_vocab_logits': [],  # NEW: L-module vocabulary logits at each timestep
                 'steps': [],
                 'h_cycles': [],
                 'l_cycles': [],
@@ -265,6 +338,8 @@ class HRMStateRecorder:
                     trace_data['q_continue_logits'].append(snapshot.q_continue_logits)
                 if snapshot.vocab_logits is not None:
                     trace_data['vocab_logits'].append(snapshot.vocab_logits)
+                if snapshot.L_vocab_logits is not None:
+                    trace_data['L_vocab_logits'].append(snapshot.L_vocab_logits)
                 if snapshot.halted is not None:
                     trace_data['halted'].append(snapshot.halted)
                     
@@ -286,6 +361,8 @@ class HRMStateRecorder:
                 stacked_data['q_continue_logits'] = torch.stack(trace_data['q_continue_logits'])
             if trace_data['vocab_logits']:
                 stacked_data['vocab_logits'] = torch.stack(trace_data['vocab_logits'])
+            if trace_data['L_vocab_logits']:
+                stacked_data['L_vocab_logits'] = torch.stack(trace_data['L_vocab_logits'])
             if trace_data['halted']:
                 stacked_data['halted'] = torch.stack(trace_data['halted'])
                 
@@ -672,7 +749,7 @@ class HRMRecordingWrapper(nn.Module):
     
     def __init__(self, model: nn.Module, recorder: HRMStateRecorder, config=None):
         super().__init__()
-        self.model = model
+        self.model = HRMInstrumentedModel(model)  # Wrap with instrumented model
         self.recorder = recorder
         self.config = config  # Store config separately
         self._step_counter = 0
@@ -730,6 +807,7 @@ class HRMRecordingWrapper(nn.Module):
             z_H=initial_z_H,
             z_L=initial_z_L,
             vocab_logits=None,  # NEW: No vocabulary logits at initial state
+            L_vocab_logits=None,  # NEW: No L-step vocabulary logits at initial state
             is_h_update=False
         )
         
@@ -768,6 +846,12 @@ class HRMRecordingWrapper(nn.Module):
             q_continue = None
             vocab_logits = None
         
+        # Extract L-step vocabulary logits from instrumented model
+        l_vocab_logits = None
+        if hasattr(self.model, 'l_vocab_logits_cache') and self.model.l_vocab_logits_cache:
+            # Use the most recent L-step vocab logits (last one computed)
+            l_vocab_logits = self.model.l_vocab_logits_cache[-1] if self.model.l_vocab_logits_cache else None
+        
         # Record final state and Q-head outputs
         if hasattr(new_carry, 'inner_carry'):
             final_z_H = new_carry.inner_carry.z_H
@@ -790,6 +874,7 @@ class HRMRecordingWrapper(nn.Module):
             q_halt_logits=q_halt,
             q_continue_logits=q_continue,
             vocab_logits=vocab_logits,  # NEW: Pass vocabulary logits to recorder
+            L_vocab_logits=l_vocab_logits,  # NEW: Pass L-step vocabulary logits to recorder
             is_h_update=True,
             halted=halted
         )
